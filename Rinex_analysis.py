@@ -1061,6 +1061,9 @@ class GNSSAnalyzer:
         filtered_combinations = 0  # 被过滤的组合数
         outlier_count = 0  # 异常值数量
         
+        # 存储线性漂移检测的详细信息
+        linear_drift_detailed = {}
+        
         # 统计总的卫星-频率组合数
         for sat_id in receiver_cmc.keys():
             if sat_id in phone_cmc:
@@ -1129,6 +1132,18 @@ class GNSSAnalyzer:
                 # 计算手机CMC的线性趋势
                 phone_cmc_linear_trend = self._check_linear_trend(phone_times_list, phone_cmc_values)
                 
+                # 存储线性漂移检测的详细信息
+                sat_freq_key = f"{sat_id}_{freq}"
+                linear_drift_detailed[sat_freq_key] = {
+                    'status': '有线性漂移' if phone_cmc_linear_trend['has_linear_drift'] else '无线性漂移',
+                    'r_squared': phone_cmc_linear_trend['r_squared'],
+                    'slope': phone_cmc_linear_trend['slope'],
+                    'intercept': phone_cmc_linear_trend['intercept'],
+                    'data_points': len(phone_cmc_values),
+                    'min_r_squared': 0.6,  # 当前阈值
+                    'min_slope_magnitude': 1e-6  # 当前阈值
+                }
+                
                 # 检查是否有明显线性漂移
                 if not phone_cmc_linear_trend['has_linear_drift']:
                     filtered_combinations += 1
@@ -1165,6 +1180,12 @@ class GNSSAnalyzer:
                 dcmc_results[sat_id] = sat_dcmc
                 
         print(f"dCMC计算完成:")
+        print(f"  总组合数: {total_combinations}")
+        print(f"  通过线性漂移检查: {processed_combinations}")
+        print(f"  被过滤组合数: {filtered_combinations}")
+        
+        # 存储线性漂移检测详细信息
+        self.results['linear_drift_detailed'] = linear_drift_detailed
         
         self.results['dcmc'] = dcmc_results
         return dcmc_results
@@ -1256,48 +1277,6 @@ class GNSSAnalyzer:
         self.results['cci_series'] = cci_results
         return cci_results
 
-    def _identify_continuous_arcs(self, times, values, max_gap_seconds=300):
-        """识别连续弧段
-        
-        参数:
-            times: 时间列表
-            values: 对应的dCMC值列表
-            max_gap_seconds: 最大允许时间间隔（秒），默认5分钟
-            
-        返回:
-            弧段列表，每个弧段包含 {'times': [...], 'values': [...]}
-        """
-        if not times or not values:
-            return []
-            
-        arcs = []
-        current_arc_times = [times[0]]
-        current_arc_values = [values[0]]
-        
-        for i in range(1, len(times)):
-            time_diff = (times[i] - times[i-1]).total_seconds()
-            
-            if time_diff <= max_gap_seconds:
-                # 连续观测，添加到当前弧段
-                current_arc_times.append(times[i])
-                current_arc_values.append(values[i])
-            else:
-                # 时间间隔过大，开始新弧段
-                arcs.append({
-                    'times': current_arc_times,
-                    'values': current_arc_values
-                })
-                current_arc_times = [times[i]]
-                current_arc_values = [values[i]]
-        
-        # 添加最后一个弧段
-        if current_arc_times:
-            arcs.append({
-                'times': current_arc_times,
-                'values': current_arc_values
-            })
-            
-        return arcs
 
     def calculate_roc_model(self, receiver_rinex_path: str = None) -> Dict:
         """计算各卫星系统各频率的ROC模型参数
@@ -1384,10 +1363,29 @@ class GNSSAnalyzer:
                 mean_roc = sum(roc_values) / len(roc_values)
                 std_roc = (sum((r - mean_roc)**2 for r in roc_values) / len(roc_values))**0.5
                 
+                # 计算变异系数（CV）
+                if mean_roc != 0:
+                    roc_cv = abs(std_roc / mean_roc)
+                else:
+                    roc_cv = float('inf') if std_roc > 0 else 0.0
+                
+                # 质量等级判断
+                if roc_cv < 0.5 and len(roc_values) >= 3:
+                    quality_level = "高质量"
+                    is_high_quality = True
+                elif 0.5 <= roc_cv < 1.0 and len(roc_values) >= 3:
+                    quality_level = "中等质量"
+                    is_high_quality = False
+                else:
+                    quality_level = "低质量"
+                    is_high_quality = False
                 
                 roc_results[system_freq_key] = {
                     'roc_rate': mean_roc,  # 单位: m/s
                     'roc_std': std_roc,
+                    'roc_cv': roc_cv,  # 变异系数
+                    'quality_level': quality_level,  # 质量等级
+                    'is_high_quality': is_high_quality,  # 是否高质量
                     'contributing_sats': system_freq_contributing_sats[system_freq_key],
                     'individual_rocs': individual_rocs[system_freq_key],
                     'num_satellites': len(roc_values)
@@ -1416,7 +1414,102 @@ class GNSSAnalyzer:
         
         return slope, intercept
 
-    def _check_linear_trend(self, times, values, min_r_squared=0.3, min_slope_magnitude=1e-6):
+    def _identify_continuous_arcs(self, times, values, max_gap_seconds=300, max_cmc_jump=100.0):
+        """识别连续弧段，同时检测周跳
+        
+        参数:
+            times: 时间列表
+            values: 对应的值列表
+            max_gap_seconds: 最大允许时间间隔（秒），默认5分钟
+            max_cmc_jump: 最大允许CMC跳跃（米），超过此值认为是周跳
+            
+        返回:
+            list: 连续弧段列表，每个弧段包含{'times': [...], 'values': [...], 'has_cycle_slip': bool}
+        """
+        if not times or not values:
+            return []
+        
+        arcs = []
+        current_arc_times = []
+        current_arc_values = []
+        has_cycle_slip = False
+        
+        for i, (time, value) in enumerate(zip(times, values)):
+            if value is None:
+                # 遇到无效值，结束当前弧段
+                if current_arc_times:
+                    arcs.append({
+                        'times': current_arc_times,
+                        'values': current_arc_values,
+                        'has_cycle_slip': has_cycle_slip
+                    })
+                    current_arc_times = []
+                    current_arc_values = []
+                    has_cycle_slip = False
+                continue
+            
+            if not current_arc_times:
+                # 开始新弧段
+                current_arc_times.append(time)
+                current_arc_values.append(value)
+            else:
+                # 检查时间间隔
+                time_diff = (time - current_arc_times[-1]).total_seconds()
+                
+                # 检查CMC跳跃（周跳检测）
+                cmc_jump = abs(value - current_arc_values[-1]) if current_arc_values else 0
+                is_cycle_slip = cmc_jump > max_cmc_jump
+                
+                # 更智能的弧段分割策略
+                should_split = False
+                
+                if time_diff > max_gap_seconds:
+                    # 时间间隔过大，必须分割
+                    should_split = True
+                elif is_cycle_slip:
+                    # 检测到可能的周跳，但需要进一步验证
+                    # 检查是否是连续的大幅变化（可能是真实周跳）
+                    if len(current_arc_values) >= 3:
+                        recent_changes = [abs(current_arc_values[i] - current_arc_values[i-1]) 
+                                        for i in range(-2, 0) if i < 0]
+                        if recent_changes and max(recent_changes) > max_cmc_jump * 0.5:
+                            # 连续大幅变化，可能是真实周跳
+                            should_split = True
+                        else:
+                            # 孤立的大幅变化，可能是数据异常，不分割
+                            should_split = False
+                    else:
+                        # 弧段太短，不分割
+                        should_split = False
+                
+                if not should_split:
+                    # 继续当前弧段
+                    current_arc_times.append(time)
+                    current_arc_values.append(value)
+                    if is_cycle_slip:
+                        has_cycle_slip = True
+                else:
+                    # 结束当前弧段，开始新弧段
+                    arcs.append({
+                        'times': current_arc_times,
+                        'values': current_arc_values,
+                        'has_cycle_slip': has_cycle_slip
+                    })
+                    current_arc_times = [time]
+                    current_arc_values = [value]
+                    has_cycle_slip = is_cycle_slip
+        
+        # 添加最后一个弧段
+        if current_arc_times:
+            arcs.append({
+                'times': current_arc_times,
+                'values': current_arc_values,
+                'has_cycle_slip': has_cycle_slip
+            })
+        
+        return arcs
+
+    def _check_linear_trend(self, times, values, min_r_squared=0.6, min_slope_magnitude=1e-6):
         """检查时间序列是否存在明显线性漂移
         
         参数:
@@ -1529,17 +1622,30 @@ class GNSSAnalyzer:
                 sat_system = sat_id[0] if sat_id else 'Unknown'
                 system_freq_key = f"{sat_system}_{freq}"
                 if system_freq_key not in roc_model:
-                    print(f"跳过 {sat_id} {freq}: 无ROC模型")
                     continue
                     
-                roc_rate = roc_model[system_freq_key]['roc_rate']  # m/s
+                roc_info = roc_model[system_freq_key]
+                roc_rate = roc_info['roc_rate']  # m/s
+                quality_level = roc_info['quality_level']
+                is_high_quality = roc_info['is_high_quality']
+                roc_cv = roc_info['roc_cv']
+                
+                # 根据质量等级决定是否进行校正
+                if quality_level == "低质量":
+                    continue
                 
                 # 识别连续弧段（用于确定t0）
                 arcs = self._identify_continuous_arcs(times, original_phase_m)
                 
-                
                 corrected_phase_m = []
                 correction_applied = []
+                
+                # 存储校正的详细信息
+                medium_quality_details = []
+                high_quality_details = []
+                
+                # 存储弧段信息用于报告
+                arc_info = []
                 
                 for arc_idx, arc in enumerate(arcs):
                     arc_times = arc['times']
@@ -1548,8 +1654,26 @@ class GNSSAnalyzer:
                     if not arc_times:
                         continue
                         
+                    # 记录弧段信息
+                    arc_duration = (arc_times[-1] - arc_times[0]).total_seconds()
+                    has_cycle_slip = arc.get('has_cycle_slip', False)
+                    
                     # t0是该弧段的起始时间
-                    t0 = arc_times[0]
+                    # 对于没有明显周跳的数据，使用全局起始时间可能更合适
+                    if not has_cycle_slip and len(arcs) > 1:
+                        # 使用整个观测期的起始时间
+                        t0 = times[0] if times else arc_times[0]
+                    else:
+                        # 使用当前弧段的起始时间
+                        t0 = arc_times[0]
+                    arc_info.append({
+                        'arc_index': arc_idx + 1,
+                        'start_time': t0,
+                        'end_time': arc_times[-1],
+                        'duration_seconds': arc_duration,
+                        'data_points': len(arc_times),
+                        'has_cycle_slip': has_cycle_slip
+                    })
                     
                     for t, phase_val in zip(arc_times, arc_phase):
                         if phase_val is None:
@@ -1560,18 +1684,78 @@ class GNSSAnalyzer:
                         # 计算时间差（秒）
                         time_diff_seconds = (t - t0).total_seconds()
                         
-                        # 应用校正：L_corrected = L_original + ROC * (t - t0)
-                        correction = -roc_rate * time_diff_seconds  # 米
-                        corrected_phase = phase_val + correction
+                        # 基础校正：L_corrected = L_original + ROC * (t - t0)
+                        base_correction = -roc_rate * time_diff_seconds  # 米
                         
-                        # 统计个位数秒数校正数量
-                        if 1 <= t.second <= 9:
-                            if not hasattr(self, '_debug_single_digit_count'):
-                                self._debug_single_digit_count = 0
-                            self._debug_single_digit_count += 1
+                        # 根据质量等级和弧段特征应用不同的校正策略
+                        if quality_level == "高质量":
+                            if has_cycle_slip:
+                                # 有周跳的弧段：应用保守校正（减少50%）
+                                correction = base_correction * 0.5
+                            else:
+                                # 无周跳的弧段：直接应用校正
+                                correction = base_correction
+                            
+                            # 记录高质量校正详情
+                            high_quality_details.append({
+                                'time': t,
+                                'time_diff_seconds': time_diff_seconds,
+                                'base_correction': base_correction,
+                                'final_correction': correction,
+                                'roc_cv': roc_cv,
+                                'arc_index': arc_idx + 1,
+                                'has_cycle_slip': has_cycle_slip
+                            })
+                            
+                        elif quality_level == "中等质量":
+                            # 中等质量：应用加权校正和时间衰减
+                            weight = max(0.3, 1.0 - roc_cv)  # 基于CV的权重
+                            time_weight = max(0.5, 1.0 - abs(time_diff_seconds) / 3600.0)  # 时间衰减
+                            
+                            # 有周跳的弧段：进一步减少校正量
+                            if has_cycle_slip:
+                                weight *= 0.3  # 额外减少70%
+                                max_correction = 0.02  # 最大校正量限制（2cm）
+                            else:
+                                max_correction = 0.05  # 最大校正量限制（5cm）
+                            
+                            correction = base_correction * weight * time_weight
+                            correction = max(-max_correction, min(max_correction, correction))
+                            
+                            # 记录中等质量校正详情
+                            medium_quality_details.append({
+                                'time': t,
+                                'time_diff_seconds': time_diff_seconds,
+                                'base_correction': base_correction,
+                                'weight': weight,
+                                'time_weight': time_weight,
+                                'final_correction': correction,
+                                'roc_cv': roc_cv,
+                                'arc_index': arc_idx + 1,
+                                'has_cycle_slip': has_cycle_slip
+                            })
+                        
+                        corrected_phase = phase_val + correction
                         
                         corrected_phase_m.append(corrected_phase)
                         correction_applied.append(correction)
+                
+                # 存储校正详情
+                if medium_quality_details:
+                    if 'medium_quality_correction_details' not in self.results:
+                        self.results['medium_quality_correction_details'] = {}
+                    self.results['medium_quality_correction_details'][f"{sat_id}_{freq}"] = {
+                        'details': medium_quality_details,
+                        'arcs': arc_info
+                    }
+                
+                if high_quality_details:
+                    if 'high_quality_correction_details' not in self.results:
+                        self.results['high_quality_correction_details'] = {}
+                    self.results['high_quality_correction_details'][f"{sat_id}_{freq}"] = {
+                        'details': high_quality_details,
+                        'arcs': arc_info
+                    }
                 
                 if corrected_phase_m:
                     sat_corrected[freq] = {
@@ -1610,6 +1794,249 @@ class GNSSAnalyzer:
         
         self.results['corrected_phase'] = corrected_results
         return corrected_results
+
+    def _generate_cci_modeling_report(self):
+        """生成码相不一致性建模报告"""
+        report_lines = []
+        report_lines.append("=" * 80)
+        report_lines.append("码相不一致性建模报告")
+        report_lines.append("=" * 80)
+        report_lines.append("")
+        
+        # 1. 线性漂移检测结果汇总
+        if 'linear_drift_detailed' in self.results:
+            report_lines.append("1. 线性漂移检测结果")
+            report_lines.append("-" * 50)
+            linear_drift_data = self.results['linear_drift_detailed']
+            
+            # 分离有线性漂移和无线性漂移的卫星-频率组合
+            has_drift = []
+            no_drift = []
+            
+            for sat_freq, drift_info in linear_drift_data.items():
+                if drift_info['status'] == '有线性漂移':
+                    has_drift.append((sat_freq, drift_info))
+                else:
+                    no_drift.append((sat_freq, drift_info))
+            
+            # 显示阈值信息（只显示一次）
+            if linear_drift_data:
+                sample_info = list(linear_drift_data.values())[0]
+                report_lines.append(f"检测阈值: R²≥{sample_info['min_r_squared']}, |斜率|≥{sample_info['min_slope_magnitude']}")
+                report_lines.append("")
+            
+            # 有线性漂移的卫星-频率组合
+            report_lines.append(f"1.1 检测到线性漂移的卫星-频率组合 ({len(has_drift)}个):")
+            report_lines.append("-" * 30)
+            if has_drift:
+                for sat_freq, drift_info in has_drift:
+                    report_lines.append(f"  {sat_freq}: R²={drift_info['r_squared']:.6f}, 斜率={drift_info['slope']:.6e} m/s, 数据点={drift_info['data_points']}")
+            else:
+                report_lines.append("  无")
+            report_lines.append("")
+            
+            # 无线性漂移的卫星-频率组合
+            report_lines.append(f"1.2 未检测到线性漂移的卫星-频率组合 ({len(no_drift)}个):")
+            report_lines.append("-" * 30)
+            if no_drift:
+                for sat_freq, drift_info in no_drift:
+                    report_lines.append(f"  {sat_freq}: R²={drift_info['r_squared']:.6f}, 斜率={drift_info['slope']:.6e} m/s, 数据点={drift_info['data_points']}")
+            else:
+                report_lines.append("  无")
+            report_lines.append("")
+        
+        # 2. ROC模型质量分析
+        if 'roc_model' in self.results:
+            report_lines.append("2. ROC模型质量分析")
+            report_lines.append("-" * 50)
+            roc_model = self.results['roc_model']
+            
+            # 按质量等级分组
+            high_quality = []
+            medium_quality = []
+            low_quality = []
+            
+            for system_freq, roc_info in roc_model.items():
+                quality = roc_info['quality_level']
+                if quality == "高质量":
+                    high_quality.append((system_freq, roc_info))
+                elif quality == "中等质量":
+                    medium_quality.append((system_freq, roc_info))
+                else:
+                    low_quality.append((system_freq, roc_info))
+            
+            # 显示质量判断标准（只显示一次）
+            report_lines.append("质量判断标准: CV<0.5(高质量), 0.5≤CV<1.0(中等质量), CV≥1.0(低质量)")
+            report_lines.append("")
+            
+            # 高质量ROC模型
+            report_lines.append(f"2.1 高质量ROC模型 ({len(high_quality)}个):")
+            report_lines.append("-" * 30)
+            if high_quality:
+                for system_freq, roc_info in high_quality:
+                    parts = system_freq.split('_', 1)
+                    system_name = {'G': 'GPS', 'R': 'GLONASS', 'E': 'Galileo', 'C': 'BDS', 'J': 'QZSS', 'I': 'IRNSS'}.get(parts[0], parts[0])
+                    contributing_sats = roc_info['contributing_sats']
+                    report_lines.append(f"  {system_name} {parts[1]}: ROC={roc_info['roc_rate']:.6e} m/s, CV={roc_info['roc_cv']:.3f}")
+                    report_lines.append(f"    参与卫星 ({len(contributing_sats)}个): {', '.join(contributing_sats)}")
+            else:
+                report_lines.append("  无")
+            report_lines.append("")
+            
+            # 中等质量ROC模型
+            report_lines.append(f"2.2 中等质量ROC模型 ({len(medium_quality)}个):")
+            report_lines.append("-" * 30)
+            if medium_quality:
+                for system_freq, roc_info in medium_quality:
+                    parts = system_freq.split('_', 1)
+                    system_name = {'G': 'GPS', 'R': 'GLONASS', 'E': 'Galileo', 'C': 'BDS', 'J': 'QZSS', 'I': 'IRNSS'}.get(parts[0], parts[0])
+                    contributing_sats = roc_info['contributing_sats']
+                    report_lines.append(f"  {system_name} {parts[1]}: ROC={roc_info['roc_rate']:.6e} m/s, CV={roc_info['roc_cv']:.3f}")
+                    report_lines.append(f"    参与卫星 ({len(contributing_sats)}个): {', '.join(contributing_sats)}")
+            else:
+                report_lines.append("  无")
+            report_lines.append("")
+            
+            # 低质量ROC模型
+            report_lines.append(f"2.3 低质量ROC模型 ({len(low_quality)}个):")
+            report_lines.append("-" * 30)
+            if low_quality:
+                for system_freq, roc_info in low_quality:
+                    parts = system_freq.split('_', 1)
+                    system_name = {'G': 'GPS', 'R': 'GLONASS', 'E': 'Galileo', 'C': 'BDS', 'J': 'QZSS', 'I': 'IRNSS'}.get(parts[0], parts[0])
+                    contributing_sats = roc_info['contributing_sats']
+                    report_lines.append(f"  {system_name} {parts[1]}: ROC={roc_info['roc_rate']:.6e} m/s, CV={roc_info['roc_cv']:.3f}")
+                    report_lines.append(f"    参与卫星 ({len(contributing_sats)}个): {', '.join(contributing_sats)}")
+            else:
+                report_lines.append("  无")
+            report_lines.append("")
+        
+        # 3. 载波相位校正详细信息
+        has_high_quality = 'high_quality_correction_details' in self.results
+        has_medium_quality = 'medium_quality_correction_details' in self.results
+        
+        if has_high_quality or has_medium_quality:
+            report_lines.append("3. 载波相位校正详细信息")
+            report_lines.append("-" * 50)
+            
+            # 3.1 高质量校正信息
+            if has_high_quality:
+                high_details = self.results['high_quality_correction_details']
+                report_lines.append(f"3.1 高质量校正信息 ({len(high_details)}个卫星-频率组合):")
+                report_lines.append("-" * 30)
+                
+                for sat_freq, data in high_details.items():
+                    details = data['details'] if isinstance(data, dict) and 'details' in data else data
+                    arcs = data['arcs'] if isinstance(data, dict) and 'arcs' in data else []
+                    # 计算校正统计信息
+                    corrections = [d['final_correction'] for d in details if d['final_correction'] is not None]
+                    if corrections:
+                        max_correction = max(corrections)
+                        min_correction = min(corrections)
+                        avg_correction = sum(corrections) / len(corrections)
+                        max_abs_correction = max(abs(max_correction), abs(min_correction))
+                    else:
+                        max_correction = min_correction = avg_correction = max_abs_correction = 0.0
+                    
+                    report_lines.append(f"  {sat_freq}:")
+                    report_lines.append(f"    校正次数: {len(details)}")
+                    report_lines.append(f"    最大校正: {max_correction:.6f}m")
+                    report_lines.append(f"    最小校正: {min_correction:.6f}m")
+                    report_lines.append(f"    平均校正: {avg_correction:.6f}m")
+                    report_lines.append(f"    最大绝对校正: {max_abs_correction:.6f}m")
+                    report_lines.append(f"    ROC CV: {details[0]['roc_cv']:.3f}")
+                    
+                    # 显示弧段信息
+                    if arcs:
+                        report_lines.append(f"    连续弧段数: {len(arcs)}")
+                        for arc in arcs:
+                            cycle_slip_info = " (检测到周跳)" if arc.get('has_cycle_slip', False) else ""
+                            report_lines.append(f"      弧段{arc['arc_index']}: {arc['start_time']} - {arc['end_time']} (时长: {arc['duration_seconds']:.1f}s, 数据点: {arc['data_points']}){cycle_slip_info}")
+                    else:
+                        report_lines.append(f"    连续弧段数: 1 (完整弧段)")
+                    
+                    # 显示前5个和后5个校正详情
+                    report_lines.append("    校正详情 (前5个):")
+                    for i, detail in enumerate(details[:5]):
+                        report_lines.append(f"      {i+1}. 时间: {detail['time']}, 时间差: {detail['time_diff_seconds']:.1f}s, 校正: {detail['final_correction']:.6f}m")
+                    
+                    if len(details) > 10:
+                        report_lines.append(f"      ... 还有 {len(details) - 10} 个校正记录")
+                        report_lines.append("    校正详情 (后5个):")
+                        for i, detail in enumerate(details[-5:], len(details)-4):
+                            report_lines.append(f"      {i}. 时间: {detail['time']}, 时间差: {detail['time_diff_seconds']:.1f}s, 校正: {detail['final_correction']:.6f}m")
+                    elif len(details) > 5:
+                        report_lines.append("    校正详情 (后5个):")
+                        for i, detail in enumerate(details[5:], 6):
+                            report_lines.append(f"      {i}. 时间: {detail['time']}, 时间差: {detail['time_diff_seconds']:.1f}s, 校正: {detail['final_correction']:.6f}m")
+                    report_lines.append("")
+            else:
+                report_lines.append("3.1 高质量校正信息: 无")
+                report_lines.append("")
+            
+            # 3.2 中等质量校正信息
+            if has_medium_quality:
+                medium_details = self.results['medium_quality_correction_details']
+                report_lines.append(f"3.2 中等质量校正信息 ({len(medium_details)}个卫星-频率组合):")
+                report_lines.append("-" * 30)
+                
+                for sat_freq, data in medium_details.items():
+                    details = data['details'] if isinstance(data, dict) and 'details' in data else data
+                    arcs = data['arcs'] if isinstance(data, dict) and 'arcs' in data else []
+                    # 计算校正统计信息
+                    corrections = [d['final_correction'] for d in details if d['final_correction'] is not None]
+                    if corrections:
+                        max_correction = max(corrections)
+                        min_correction = min(corrections)
+                        avg_correction = sum(corrections) / len(corrections)
+                        max_abs_correction = max(abs(max_correction), abs(min_correction))
+                    else:
+                        max_correction = min_correction = avg_correction = max_abs_correction = 0.0
+                    
+                    report_lines.append(f"  {sat_freq}:")
+                    report_lines.append(f"    校正次数: {len(details)}")
+                    report_lines.append(f"    最大校正: {max_correction:.6f}m")
+                    report_lines.append(f"    最小校正: {min_correction:.6f}m")
+                    report_lines.append(f"    平均校正: {avg_correction:.6f}m")
+                    report_lines.append(f"    最大绝对校正: {max_abs_correction:.6f}m")
+                    report_lines.append(f"    ROC CV: {details[0]['roc_cv']:.3f}")
+                    
+                    # 显示弧段信息
+                    if arcs:
+                        report_lines.append(f"    连续弧段数: {len(arcs)}")
+                        for arc in arcs:
+                            cycle_slip_info = " (检测到周跳)" if arc.get('has_cycle_slip', False) else ""
+                            report_lines.append(f"      弧段{arc['arc_index']}: {arc['start_time']} - {arc['end_time']} (时长: {arc['duration_seconds']:.1f}s, 数据点: {arc['data_points']}){cycle_slip_info}")
+                    else:
+                        report_lines.append(f"    连续弧段数: 1 (完整弧段)")
+                    
+                    # 显示前5个和后5个校正详情
+                    report_lines.append("    校正详情 (前5个):")
+                    for i, detail in enumerate(details[:5]):
+                        report_lines.append(f"      {i+1}. 时间: {detail['time']}, 时间差: {detail['time_diff_seconds']:.1f}s")
+                        report_lines.append(f"         基础校正: {detail['base_correction']:.6f}m, 权重: {detail['weight']:.3f}, 时间权重: {detail['time_weight']:.3f}")
+                        report_lines.append(f"         最终校正: {detail['final_correction']:.6f}m")
+                    
+                    if len(details) > 10:
+                        report_lines.append(f"      ... 还有 {len(details) - 10} 个校正记录")
+                        report_lines.append("    校正详情 (后5个):")
+                        for i, detail in enumerate(details[-5:], len(details)-4):
+                            report_lines.append(f"      {i}. 时间: {detail['time']}, 时间差: {detail['time_diff_seconds']:.1f}s")
+                            report_lines.append(f"         基础校正: {detail['base_correction']:.6f}m, 权重: {detail['weight']:.3f}, 时间权重: {detail['time_weight']:.3f}")
+                            report_lines.append(f"         最终校正: {detail['final_correction']:.6f}m")
+                    elif len(details) > 5:
+                        report_lines.append("    校正详情 (后5个):")
+                        for i, detail in enumerate(details[5:], 6):
+                            report_lines.append(f"      {i}. 时间: {detail['time']}, 时间差: {detail['time_diff_seconds']:.1f}s")
+                            report_lines.append(f"         基础校正: {detail['base_correction']:.6f}m, 权重: {detail['weight']:.3f}, 时间权重: {detail['time_weight']:.3f}")
+                            report_lines.append(f"         最终校正: {detail['final_correction']:.6f}m")
+                    report_lines.append("")
+            else:
+                report_lines.append("3.2 中等质量校正信息: 无")
+                report_lines.append("")
+        
+        return "\n".join(report_lines)
+
 
     def generate_corrected_rinex_file(self, receiver_rinex_path: str, output_path: str = None) -> str:
         """生成校正后的手机RINEX数据文件
@@ -2171,101 +2598,6 @@ class GNSSAnalyzer:
             'report': report
         }
 
-    def _generate_cci_modeling_report(self) -> str:
-        """生成码相不一致性建模分析报告"""
-        report_lines = []
-        report_lines.append("=" * 80)
-        report_lines.append("码相不一致性建模和校正分析报告")
-        report_lines.append("=" * 80)
-        report_lines.append("")
-        
-        # 基本信息
-        report_lines.append("1. 分析基本信息")
-        report_lines.append("-" * 40)
-        if self.input_file_path:
-            report_lines.append(f"手机RINEX文件: {self.input_file_path}")
-        if self.receiver_input_file_path:
-            report_lines.append(f"接收机RINEX文件: {self.receiver_input_file_path}")
-        report_lines.append(f"分析时间: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-        report_lines.append("")
-        
-        # ROC模型参数
-        if self.results.get('roc_model'):
-            report_lines.append("2. ROC模型参数（按卫星系统分别计算）")
-            report_lines.append("-" * 40)
-            for system_freq_key, roc_info in self.results['roc_model'].items():
-                # 解析系统-频率键
-                parts = system_freq_key.split('_', 1)
-                if len(parts) == 2:
-                    sat_system = parts[0]
-                    freq = parts[1]
-                    system_name = {'G': 'GPS', 'R': 'GLONASS', 'E': 'Galileo', 'C': 'BDS', 'J': 'QZSS', 'I': 'IRNSS'}.get(sat_system, sat_system)
-                    report_lines.append(f"{system_name} 系统 频率 {freq}:")
-                else:
-                    report_lines.append(f"系统-频率 {system_freq_key}:")
-                report_lines.append(f"  ROC变化率: {roc_info['roc_rate']:.6e} m/s")
-                report_lines.append(f"  标准差: {roc_info['roc_std']:.6e} m/s")
-                report_lines.append(f"  参与卫星数: {roc_info['num_satellites']}")
-                report_lines.append(f"  参与卫星: {', '.join(roc_info['contributing_sats'])}")
-                report_lines.append("")
-        
-        # 统计信息
-        if self.results.get('dcmc'):
-            report_lines.append("3. dCMC统计信息")
-            report_lines.append("-" * 40)
-            dcmc_data = self.results['dcmc']
-            total_combinations = 0
-            total_points = 0
-            
-            for sat_id, freq_data in dcmc_data.items():
-                for freq, dcmc_info in freq_data.items():
-                    total_combinations += 1
-                    total_points += len(dcmc_info['dcmc'])
-                    
-            report_lines.append(f"卫星-频率组合数: {total_combinations}")
-            report_lines.append(f"总观测点数: {total_points}")
-            report_lines.append("")
-        
-        # CCI分析结果
-        if self.results.get('cci_series'):
-            report_lines.append("4. CCI时间序列分析")
-            report_lines.append("-" * 40)
-            cci_data = self.results['cci_series']
-            
-            for sat_id, freq_data in cci_data.items():
-                report_lines.append(f"卫星 {sat_id}:")
-                for freq, cci_info in freq_data.items():
-                    arc_info = cci_info['arc_info']
-                    report_lines.append(f"  频率 {freq}: {len(arc_info)} 个连续弧段")
-                    for arc in arc_info:
-                        report_lines.append(f"    弧段 {arc['arc_index']+1}: 时长 {arc['duration']:.1f}s, "
-                                          f"点数 {arc['num_points']}, CCI范围 {arc['cci_range']:.4f}m")
-                report_lines.append("")
-        
-        # 校正效果统计
-        if self.results.get('corrected_phase'):
-            report_lines.append("5. 校正效果统计")
-            report_lines.append("-" * 40)
-            corrected_data = self.results['corrected_phase']
-            
-            for sat_id, freq_data in corrected_data.items():
-                report_lines.append(f"卫星 {sat_id}:")
-                for freq, freq_data in freq_data.items():
-                    corrections = [c for c in freq_data['correction_applied'] if c is not None]
-                    if corrections:
-                        max_corr = max(corrections)
-                        min_corr = min(corrections)
-                        mean_corr = sum(corrections) / len(corrections)
-                        report_lines.append(f"  频率 {freq}: 校正范围 [{min_corr:.4f}, {max_corr:.4f}]m, "
-                                          f"平均校正 {mean_corr:.4f}m")
-                report_lines.append("")
-        
-        report_lines.append("=" * 80)
-        report_lines.append("报告结束")
-        report_lines.append("=" * 80)
-        
-        return "\n".join(report_lines)
-
     def save_cci_processing_log(self, receiver_rinex_path: str) -> str:
         """保存码相不一致性处理日志，格式仿照code_phase_cleaning.log
         
@@ -2375,7 +2707,7 @@ class GNSSAnalyzer:
                 log_content.append(f"  标准差: {roc_info['roc_std']:.6e} m/s\n")
                 log_content.append(f"  参与卫星数: {roc_info['num_satellites']}\n")
                 log_content.append(f"  参与卫星: {', '.join(roc_info['contributing_sats'])}\n\n")
-            
+    
         # dCMC统计信息
         if self.results.get('dcmc'):
             log_content.append("dCMC统计信息:\n")
