@@ -1228,7 +1228,8 @@ class GNSSAnalyzer:
                     continue
                     
                 # 识别连续弧段（基于时间间隔）
-                arcs = self._identify_continuous_arcs(times, dcmc_values)
+                sat_freq_info = f"{sat_id}_{freq}"
+                arcs = self._identify_continuous_arcs(times, dcmc_values, sat_freq_info=sat_freq_info)
                 
                 all_cci_vals = []
                 all_times = []
@@ -1414,17 +1415,17 @@ class GNSSAnalyzer:
         
         return slope, intercept
 
-    def _identify_continuous_arcs(self, times, values, max_gap_seconds=300, max_cmc_jump=100.0):
-        """识别连续弧段，同时检测周跳
+    def _identify_continuous_arcs(self, times, values, max_gap_seconds=300, sat_freq_info=""):
+        """识别连续弧段，基于时间间隔分割
         
         参数:
             times: 时间列表
             values: 对应的值列表
             max_gap_seconds: 最大允许时间间隔（秒），默认5分钟
-            max_cmc_jump: 最大允许CMC跳跃（米），超过此值认为是周跳
+            sat_freq_info: 卫星频率信息，用于调试输出
             
         返回:
-            list: 连续弧段列表，每个弧段包含{'times': [...], 'values': [...], 'has_cycle_slip': bool}
+            list: 连续弧段列表，每个弧段包含{'times': [...], 'values': [...], 'has_cycle_slip': False}
         """
         if not times or not values:
             return []
@@ -1432,20 +1433,10 @@ class GNSSAnalyzer:
         arcs = []
         current_arc_times = []
         current_arc_values = []
-        has_cycle_slip = False
         
         for i, (time, value) in enumerate(zip(times, values)):
             if value is None:
-                # 遇到无效值，结束当前弧段
-                if current_arc_times:
-                    arcs.append({
-                        'times': current_arc_times,
-                        'values': current_arc_values,
-                        'has_cycle_slip': has_cycle_slip
-                    })
-                    current_arc_times = []
-                    current_arc_values = []
-                    has_cycle_slip = False
+                # 遇到无效值，跳过但不分割弧段
                 continue
             
             if not current_arc_times:
@@ -1456,55 +1447,28 @@ class GNSSAnalyzer:
                 # 检查时间间隔
                 time_diff = (time - current_arc_times[-1]).total_seconds()
                 
-                # 检查CMC跳跃（周跳检测）
-                cmc_jump = abs(value - current_arc_values[-1]) if current_arc_values else 0
-                is_cycle_slip = cmc_jump > max_cmc_jump
-                
-                # 更智能的弧段分割策略
-                should_split = False
-                
+                # 弧段分割策略：仅基于时间间隔
                 if time_diff > max_gap_seconds:
-                    # 时间间隔过大，必须分割
-                    should_split = True
-                elif is_cycle_slip:
-                    # 检测到可能的周跳，但需要进一步验证
-                    # 检查是否是连续的大幅变化（可能是真实周跳）
-                    if len(current_arc_values) >= 3:
-                        recent_changes = [abs(current_arc_values[i] - current_arc_values[i-1]) 
-                                        for i in range(-2, 0) if i < 0]
-                        if recent_changes and max(recent_changes) > max_cmc_jump * 0.5:
-                            # 连续大幅变化，可能是真实周跳
-                            should_split = True
-                        else:
-                            # 孤立的大幅变化，可能是数据异常，不分割
-                            should_split = False
-                    else:
-                        # 弧段太短，不分割
-                        should_split = False
-                
-                if not should_split:
-                    # 继续当前弧段
-                    current_arc_times.append(time)
-                    current_arc_values.append(value)
-                    if is_cycle_slip:
-                        has_cycle_slip = True
-                else:
-                    # 结束当前弧段，开始新弧段
+                    # 时间间隔过大（>5分钟），分割弧段
+                    print(f"弧段分割 - 时间间隔: {time_diff:.1f}s > {max_gap_seconds}s, 时间: {time}, 卫星频率: {sat_freq_info}")
                     arcs.append({
                         'times': current_arc_times,
                         'values': current_arc_values,
-                        'has_cycle_slip': has_cycle_slip
+                        'has_cycle_slip': False
                     })
                     current_arc_times = [time]
                     current_arc_values = [value]
-                    has_cycle_slip = is_cycle_slip
+                else:
+                    # 时间间隔<5分钟，继续当前弧段
+                    current_arc_times.append(time)
+                    current_arc_values.append(value)
         
         # 添加最后一个弧段
         if current_arc_times:
             arcs.append({
                 'times': current_arc_times,
                 'values': current_arc_values,
-                'has_cycle_slip': has_cycle_slip
+                'has_cycle_slip': False
             })
         
         return arcs
@@ -1635,7 +1599,8 @@ class GNSSAnalyzer:
                     continue
                 
                 # 识别连续弧段（用于确定t0）
-                arcs = self._identify_continuous_arcs(times, original_phase_m)
+                sat_freq_info = f"{sat_id}_{freq}"
+                arcs = self._identify_continuous_arcs(times, original_phase_m, sat_freq_info=sat_freq_info)
                 
                 corrected_phase_m = []
                 correction_applied = []
@@ -1658,14 +1623,18 @@ class GNSSAnalyzer:
                     arc_duration = (arc_times[-1] - arc_times[0]).total_seconds()
                     has_cycle_slip = arc.get('has_cycle_slip', False)
                     
-                    # t0是该弧段的起始时间
-                    # 对于没有明显周跳的数据，使用全局起始时间可能更合适
-                    if not has_cycle_slip and len(arcs) > 1:
-                        # 使用整个观测期的起始时间
-                        t0 = times[0] if times else arc_times[0]
-                    else:
-                        # 使用当前弧段的起始时间
+                    # t0时间基准选择
+                    if has_cycle_slip:
+                        # 有周跳的弧段：以周跳历元为新的t0
                         t0 = arc_times[0]
+                    else:
+                        # 无周跳的弧段：以全局起始时间为t0（只有第一个弧段）
+                        if arc_idx == 0:
+                            # 第一个弧段：使用全局起始时间
+                            t0 = times[0] if times else arc_times[0]
+                        else:
+                            # 后续弧段：使用当前弧段的起始时间
+                            t0 = arc_times[0]
                     arc_info.append({
                         'arc_index': arc_idx + 1,
                         'start_time': t0,
@@ -1946,14 +1915,6 @@ class GNSSAnalyzer:
                     report_lines.append(f"    最大绝对校正: {max_abs_correction:.6f}m")
                     report_lines.append(f"    ROC CV: {details[0]['roc_cv']:.3f}")
                     
-                    # 显示弧段信息
-                    if arcs:
-                        report_lines.append(f"    连续弧段数: {len(arcs)}")
-                        for arc in arcs:
-                            cycle_slip_info = " (检测到周跳)" if arc.get('has_cycle_slip', False) else ""
-                            report_lines.append(f"      弧段{arc['arc_index']}: {arc['start_time']} - {arc['end_time']} (时长: {arc['duration_seconds']:.1f}s, 数据点: {arc['data_points']}){cycle_slip_info}")
-                    else:
-                        report_lines.append(f"    连续弧段数: 1 (完整弧段)")
                     
                     # 显示前5个和后5个校正详情
                     report_lines.append("    校正详情 (前5个):")
@@ -2001,14 +1962,6 @@ class GNSSAnalyzer:
                     report_lines.append(f"    最大绝对校正: {max_abs_correction:.6f}m")
                     report_lines.append(f"    ROC CV: {details[0]['roc_cv']:.3f}")
                     
-                    # 显示弧段信息
-                    if arcs:
-                        report_lines.append(f"    连续弧段数: {len(arcs)}")
-                        for arc in arcs:
-                            cycle_slip_info = " (检测到周跳)" if arc.get('has_cycle_slip', False) else ""
-                            report_lines.append(f"      弧段{arc['arc_index']}: {arc['start_time']} - {arc['end_time']} (时长: {arc['duration_seconds']:.1f}s, 数据点: {arc['data_points']}){cycle_slip_info}")
-                    else:
-                        report_lines.append(f"    连续弧段数: 1 (完整弧段)")
                     
                     # 显示前5个和后5个校正详情
                     report_lines.append("    校正详情 (前5个):")
