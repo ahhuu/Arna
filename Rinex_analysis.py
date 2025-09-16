@@ -21,6 +21,13 @@ class GNSSAnalyzer:
 
     def __init__(self):
         # 定义GNSS信号频率 (Hz)
+        self.r_squared_threshold = 0.5  # R方阈值，默认0.5
+        # 历元间双差最大阈值限制
+        self.max_threshold_limits = {
+            'code': 10.0,    # 伪距（米）
+            'phase': 3.0,    # 相位（米）
+            'doppler': 5.0   # 多普勒（米/秒）
+        }
         self.frequencies = {
             'G': {'L1C': 1575.42e6, 'L5Q': 1176.45e6},  # GPS
             'R': {'L1C': 1602e6, 'L5Q': 1246e6},  # GLONASS
@@ -1130,7 +1137,7 @@ class GNSSAnalyzer:
                     continue
                 
                 # 计算手机CMC的线性趋势
-                phone_cmc_linear_trend = self._check_linear_trend(phone_times_list, phone_cmc_values)
+                phone_cmc_linear_trend = self._check_linear_trend(phone_times_list, phone_cmc_values, self.r_squared_threshold)
                 
                 # 存储线性漂移检测的详细信息
                 sat_freq_key = f"{sat_id}_{freq}"
@@ -1140,7 +1147,7 @@ class GNSSAnalyzer:
                     'slope': phone_cmc_linear_trend['slope'],
                     'intercept': phone_cmc_linear_trend['intercept'],
                     'data_points': len(phone_cmc_values),
-                    'min_r_squared': 0.6,  # 当前阈值
+                    'min_r_squared': self.r_squared_threshold,  # 当前阈值
                     'min_slope_magnitude': 1e-6  # 当前阈值
                 }
                 
@@ -1358,7 +1365,9 @@ class GNSSAnalyzer:
                 processed_combinations += 1
                 self.update_progress(int(processed_combinations / max(total_combinations, 1) * 100))
         
-        # 计算各系统-频率的平均ROC
+        # 计算各系统-频率的平均ROC和个体ROC
+        individual_roc_models = {}  # 存储个体级ROC模型
+        
         for system_freq_key, roc_values in system_freq_rocs.items():
             if roc_values:
                 mean_roc = sum(roc_values) / len(roc_values)
@@ -1370,7 +1379,7 @@ class GNSSAnalyzer:
                 else:
                     roc_cv = float('inf') if std_roc > 0 else 0.0
                 
-                # 质量等级判断
+                # 质量等级判断（只针对系统级模型）
                 if roc_cv < 0.5 and len(roc_values) >= 3:
                     quality_level = "高质量"
                     is_high_quality = True
@@ -1378,22 +1387,52 @@ class GNSSAnalyzer:
                     quality_level = "中等质量"
                     is_high_quality = False
                 else:
-                    quality_level = "低质量"
-                    is_high_quality = False
+                    # 这种情况会建立个体级模型，不需要质量等级
+                    quality_level = "个体级"
+                    is_high_quality = True
                 
-                roc_results[system_freq_key] = {
-                    'roc_rate': mean_roc,  # 单位: m/s
-                    'roc_std': std_roc,
-                    'roc_cv': roc_cv,  # 变异系数
-                    'quality_level': quality_level,  # 质量等级
-                    'is_high_quality': is_high_quality,  # 是否高质量
-                    'contributing_sats': system_freq_contributing_sats[system_freq_key],
-                    'individual_rocs': individual_rocs[system_freq_key],
-                    'num_satellites': len(roc_values)
-                }
+                # 根据CV值决定使用系统级还是个体级ROC模型
+                if roc_cv < 0.5 and len(roc_values) >= 3:
+                    # CV<0.5且数据点≥3：使用系统级ROC模型
+                    roc_results[system_freq_key] = {
+                        'roc_rate': mean_roc,  # 单位: m/s
+                        'roc_std': std_roc,
+                        'roc_cv': roc_cv,  # 变异系数
+                        'quality_level': quality_level,  # 质量等级
+                        'is_high_quality': is_high_quality,  # 是否高质量
+                        'contributing_sats': system_freq_contributing_sats[system_freq_key],
+                        'individual_rocs': individual_rocs[system_freq_key],
+                        'num_satellites': len(roc_values),
+                        'model_type': 'system_level'  # 系统级模型
+                    }
+                else:
+                    # CV≥0.5或数据点<3：为每个卫星建立个体ROC模型
+                    if roc_cv >= 0.5:
+                        print(f"系统-频率 {system_freq_key} CV值过高({roc_cv:.3f}≥0.5)，建立个体ROC模型")
+                    else:
+                        print(f"系统-频率 {system_freq_key} 数据点不足({len(roc_values)}<3)，建立个体ROC模型")
+                    
+                    for sat_id, individual_roc in individual_rocs[system_freq_key].items():
+                        individual_key = f"{sat_id}_{system_freq_key.split('_')[1]}"  # 如: E04_L7Q
+                        individual_roc_models[individual_key] = {
+                            'roc_rate': individual_roc,  # 单位: m/s
+                            'roc_std': 0.0,  # 个体模型无标准差
+                            'roc_cv': 0.0,  # 个体模型无变异系数
+                            'quality_level': "个体级",  # 个体级质量
+                            'is_high_quality': True,  # 个体级默认为高质量
+                            'contributing_sats': [sat_id],
+                            'individual_rocs': {sat_id: individual_roc},
+                            'num_satellites': 1,
+                            'model_type': 'individual_level'  # 个体级模型
+                        }
         
-        self.results['roc_model'] = roc_results
-        return roc_results
+        # 合并系统级和个体级ROC模型
+        all_roc_models = {**roc_results, **individual_roc_models}
+        self.results['roc_model'] = all_roc_models
+        self.results['individual_roc_models'] = individual_roc_models
+        
+        print(f"ROC模型计算完成: 系统级模型 {len(roc_results)} 个, 个体级模型 {len(individual_roc_models)} 个")
+        return all_roc_models
 
     def _linear_fit(self, x_values, y_values):
         """简单线性拟合，返回斜率和截距"""
@@ -1473,13 +1512,13 @@ class GNSSAnalyzer:
         
         return arcs
 
-    def _check_linear_trend(self, times, values, min_r_squared=0.6, min_slope_magnitude=1e-6):
+    def _check_linear_trend(self, times, values, min_r_squared=0.5, min_slope_magnitude=1e-6):
         """检查时间序列是否存在明显线性漂移
         
         参数:
             times: 时间列表
             values: 对应的值列表
-            min_r_squared: 最小R²阈值，默认0.3
+            min_r_squared: 最小R²阈值，默认0.5
             min_slope_magnitude: 最小斜率绝对值阈值，默认1e-6 m/s
             
         返回:
@@ -1582,13 +1621,25 @@ class GNSSAnalyzer:
                     continue
                 
                     
-                # 检查该频率是否有ROC模型
+                # 检查该频率是否有ROC模型（优先系统级，其次个体级）
                 sat_system = sat_id[0] if sat_id else 'Unknown'
                 system_freq_key = f"{sat_system}_{freq}"
-                if system_freq_key not in roc_model:
+                individual_key = f"{sat_id}_{freq}"
+                
+                roc_info = None
+                model_type = None
+                
+                # 优先使用系统级ROC模型
+                if system_freq_key in roc_model:
+                    roc_info = roc_model[system_freq_key]
+                    model_type = "系统级"
+                # 其次使用个体级ROC模型
+                elif individual_key in roc_model:
+                    roc_info = roc_model[individual_key]
+                    model_type = "个体级"
+                else:
                     continue
                     
-                roc_info = roc_model[system_freq_key]
                 roc_rate = roc_info['roc_rate']  # m/s
                 quality_level = roc_info['quality_level']
                 is_high_quality = roc_info['is_high_quality']
@@ -1673,7 +1724,8 @@ class GNSSAnalyzer:
                                 'final_correction': correction,
                                 'roc_cv': roc_cv,
                                 'arc_index': arc_idx + 1,
-                                'has_cycle_slip': has_cycle_slip
+                                'has_cycle_slip': has_cycle_slip,
+                                'model_type': model_type
                             })
                             
                         elif quality_level == "中等质量":
@@ -1701,7 +1753,29 @@ class GNSSAnalyzer:
                                 'final_correction': correction,
                                 'roc_cv': roc_cv,
                                 'arc_index': arc_idx + 1,
-                                'has_cycle_slip': has_cycle_slip
+                                'has_cycle_slip': has_cycle_slip,
+                                'model_type': model_type
+                            })
+                        
+                        elif quality_level == "个体级":
+                            # 个体级：直接应用校正（与高质量相同策略）
+                            if has_cycle_slip:
+                                # 有周跳的弧段：应用保守校正（减少50%）
+                                correction = base_correction * 0.5
+                            else:
+                                # 无周跳的弧段：直接应用校正
+                                correction = base_correction
+                            
+                            # 记录个体级校正详情
+                            high_quality_details.append({
+                                'time': t,
+                                'time_diff_seconds': time_diff_seconds,
+                                'base_correction': base_correction,
+                                'final_correction': correction,
+                                'roc_cv': roc_cv,
+                                'arc_index': arc_idx + 1,
+                                'has_cycle_slip': has_cycle_slip,
+                                'model_type': model_type
                             })
                         
                         corrected_phase = phase_val + correction
@@ -1820,29 +1894,32 @@ class GNSSAnalyzer:
             report_lines.append("-" * 50)
             roc_model = self.results['roc_model']
             
-            # 按质量等级分组
-            high_quality = []
-            medium_quality = []
-            low_quality = []
+            # 按质量等级和模型类型分组
+            high_quality_system = []
+            medium_quality_system = []
+            individual_models = []
             
             for system_freq, roc_info in roc_model.items():
                 quality = roc_info['quality_level']
-                if quality == "高质量":
-                    high_quality.append((system_freq, roc_info))
+                model_type = roc_info.get('model_type', 'system_level')
+                
+                if model_type == 'individual_level':
+                    individual_models.append((system_freq, roc_info))
+                elif quality == "高质量":
+                    high_quality_system.append((system_freq, roc_info))
                 elif quality == "中等质量":
-                    medium_quality.append((system_freq, roc_info))
-                else:
-                    low_quality.append((system_freq, roc_info))
+                    medium_quality_system.append((system_freq, roc_info))
             
-            # 显示质量判断标准（只显示一次）
-            report_lines.append("质量判断标准: CV<0.5(高质量), 0.5≤CV<1.0(中等质量), CV≥1.0(低质量)")
+            # 显示质量判断标准和模型选择策略（只显示一次）
+            report_lines.append("系统级模型质量判断: CV<0.5(高质量), 0.5≤CV<1.0(中等质量)")
+            report_lines.append("模型选择策略: CV<0.5且数据点≥3→系统级模型, CV≥0.5或数据点<3→个体级模型")
             report_lines.append("")
             
-            # 高质量ROC模型
-            report_lines.append(f"2.1 高质量ROC模型 ({len(high_quality)}个):")
+            # 高质量系统级ROC模型
+            report_lines.append(f"2.1 高质量系统级ROC模型 ({len(high_quality_system)}个):")
             report_lines.append("-" * 30)
-            if high_quality:
-                for system_freq, roc_info in high_quality:
+            if high_quality_system:
+                for system_freq, roc_info in high_quality_system:
                     parts = system_freq.split('_', 1)
                     system_name = {'G': 'GPS', 'R': 'GLONASS', 'E': 'Galileo', 'C': 'BDS', 'J': 'QZSS', 'I': 'IRNSS'}.get(parts[0], parts[0])
                     contributing_sats = roc_info['contributing_sats']
@@ -1852,11 +1929,11 @@ class GNSSAnalyzer:
                 report_lines.append("  无")
             report_lines.append("")
             
-            # 中等质量ROC模型
-            report_lines.append(f"2.2 中等质量ROC模型 ({len(medium_quality)}个):")
+            # 中等质量系统级ROC模型
+            report_lines.append(f"2.2 中等质量系统级ROC模型 ({len(medium_quality_system)}个):")
             report_lines.append("-" * 30)
-            if medium_quality:
-                for system_freq, roc_info in medium_quality:
+            if medium_quality_system:
+                for system_freq, roc_info in medium_quality_system:
                     parts = system_freq.split('_', 1)
                     system_name = {'G': 'GPS', 'R': 'GLONASS', 'E': 'Galileo', 'C': 'BDS', 'J': 'QZSS', 'I': 'IRNSS'}.get(parts[0], parts[0])
                     contributing_sats = roc_info['contributing_sats']
@@ -1866,18 +1943,29 @@ class GNSSAnalyzer:
                 report_lines.append("  无")
             report_lines.append("")
             
-            # 低质量ROC模型
-            report_lines.append(f"2.3 低质量ROC模型 ({len(low_quality)}个):")
+            # 个体级ROC模型
+            report_lines.append(f"2.3 个体级ROC模型 ({len(individual_models)}个):")
             report_lines.append("-" * 30)
-            if low_quality:
-                for system_freq, roc_info in low_quality:
-                    parts = system_freq.split('_', 1)
-                    system_name = {'G': 'GPS', 'R': 'GLONASS', 'E': 'Galileo', 'C': 'BDS', 'J': 'QZSS', 'I': 'IRNSS'}.get(parts[0], parts[0])
-                    contributing_sats = roc_info['contributing_sats']
-                    report_lines.append(f"  {system_name} {parts[1]}: ROC={roc_info['roc_rate']:.6e} m/s, CV={roc_info['roc_cv']:.3f}")
-                    report_lines.append(f"    参与卫星 ({len(contributing_sats)}个): {', '.join(contributing_sats)}")
+            if individual_models:
+                # 按卫星系统分组显示
+                individual_by_system = {}
+                for sat_freq, roc_info in individual_models:
+                    sat_id = sat_freq.split('_')[0]
+                    freq = sat_freq.split('_')[1]
+                    system = sat_id[0]
+                    if system not in individual_by_system:
+                        individual_by_system[system] = []
+                    individual_by_system[system].append((sat_id, freq, roc_info))
+                
+                for system, sats in individual_by_system.items():
+                    system_name = {'G': 'GPS', 'R': 'GLONASS', 'E': 'Galileo', 'C': 'BDS', 'J': 'QZSS', 'I': 'IRNSS'}.get(system, system)
+                    report_lines.append(f"  {system_name}系统:")
+                    for sat_id, freq, roc_info in sats:
+                        report_lines.append(f"    {sat_id} {freq}: ROC={roc_info['roc_rate']:.6e} m/s")
             else:
                 report_lines.append("  无")
+            report_lines.append("")
+            
             report_lines.append("")
         
         # 3. 载波相位校正详细信息
@@ -1888,13 +1976,127 @@ class GNSSAnalyzer:
             report_lines.append("3. 载波相位校正详细信息")
             report_lines.append("-" * 50)
             
-            # 3.1 高质量校正信息
+            # 分离系统级和个体级校正信息
+            system_level_high = {}
+            individual_level_high = {}
+            system_level_medium = {}
+            individual_level_medium = {}
+            
             if has_high_quality:
                 high_details = self.results['high_quality_correction_details']
-                report_lines.append(f"3.1 高质量校正信息 ({len(high_details)}个卫星-频率组合):")
+                for sat_freq, data in high_details.items():
+                    details = data['details'] if isinstance(data, dict) and 'details' in data else data
+                    if details:
+                        model_type = details[0].get('model_type', 'system_level')
+                        if model_type == 'individual_level':
+                            individual_level_high[sat_freq] = data
+                        else:
+                            system_level_high[sat_freq] = data
+            
+            if has_medium_quality:
+                medium_details = self.results['medium_quality_correction_details']
+                for sat_freq, data in medium_details.items():
+                    details = data['details'] if isinstance(data, dict) and 'details' in data else data
+                    if details:
+                        model_type = details[0].get('model_type', 'system_level')
+                        if model_type == 'individual_level':
+                            individual_level_medium[sat_freq] = data
+                        else:
+                            system_level_medium[sat_freq] = data
+            
+            # 3.1 系统级校正信息
+            if system_level_high or system_level_medium:
+                report_lines.append("3.1 系统级校正信息")
                 report_lines.append("-" * 30)
                 
-                for sat_freq, data in high_details.items():
+                # 3.1.1 高质量系统级校正
+                if system_level_high:
+                    report_lines.append(f"3.1.1 高质量系统级校正 ({len(system_level_high)}个卫星-频率组合):")
+                    report_lines.append("-" * 25)
+                    
+                    for sat_freq, data in system_level_high.items():
+                        details = data['details'] if isinstance(data, dict) and 'details' in data else data
+                        arcs = data['arcs'] if isinstance(data, dict) and 'arcs' in data else []
+                        # 计算校正统计信息
+                        corrections = [d['final_correction'] for d in details if d['final_correction'] is not None]
+                        if corrections:
+                            max_correction = max(corrections)
+                            min_correction = min(corrections)
+                            avg_correction = sum(corrections) / len(corrections)
+                            max_abs_correction = max(abs(max_correction), abs(min_correction))
+                        else:
+                            max_correction = min_correction = avg_correction = max_abs_correction = 0.0
+                        
+                        report_lines.append(f"  {sat_freq}:")
+                        report_lines.append(f"    校正次数: {len(details)}")
+                        report_lines.append(f"    最大校正: {max_correction:.6f}m")
+                        report_lines.append(f"    最小校正: {min_correction:.6f}m")
+                        report_lines.append(f"    平均校正: {avg_correction:.6f}m")
+                        report_lines.append(f"    最大绝对校正: {max_abs_correction:.6f}m")
+                        report_lines.append(f"    ROC CV: {details[0]['roc_cv']:.3f}")
+                        
+                        # 显示前5个和后5个校正详情
+                        report_lines.append("    校正详情 (前5个):")
+                        for i, detail in enumerate(details[:5]):
+                            report_lines.append(f"      {i+1}. 时间: {detail['time']}, 时间差: {detail['time_diff_seconds']:.1f}s, 校正: {detail['final_correction']:.6f}m")
+                        
+                        if len(details) > 10:
+                            report_lines.append(f"      ... 还有 {len(details) - 10} 个校正记录")
+                            report_lines.append("    校正详情 (后5个):")
+                            for i, detail in enumerate(details[-5:], len(details)-4):
+                                report_lines.append(f"      {i}. 时间: {detail['time']}, 时间差: {detail['time_diff_seconds']:.1f}s, 校正: {detail['final_correction']:.6f}m")
+                        elif len(details) > 5:
+                            report_lines.append("    校正详情 (后5个):")
+                            for i, detail in enumerate(details[5:], 6):
+                                report_lines.append(f"      {i}. 时间: {detail['time']}, 时间差: {detail['time_diff_seconds']:.1f}s, 校正: {detail['final_correction']:.6f}m")
+                        report_lines.append("")
+                
+                # 3.1.2 中等质量系统级校正
+                if system_level_medium:
+                    report_lines.append(f"3.1.2 中等质量系统级校正 ({len(system_level_medium)}个卫星-频率组合):")
+                    report_lines.append("-" * 25)
+                    
+                    for sat_freq, data in system_level_medium.items():
+                        details = data['details'] if isinstance(data, dict) and 'details' in data else data
+                        arcs = data['arcs'] if isinstance(data, dict) and 'arcs' in data else []
+                        # 计算校正统计信息
+                        corrections = [d['final_correction'] for d in details if d['final_correction'] is not None]
+                        if corrections:
+                            max_correction = max(corrections)
+                            min_correction = min(corrections)
+                            avg_correction = sum(corrections) / len(corrections)
+                            max_abs_correction = max(abs(max_correction), abs(min_correction))
+                        else:
+                            max_correction = min_correction = avg_correction = max_abs_correction = 0.0
+                        
+                        report_lines.append(f"  {sat_freq}:")
+                        report_lines.append(f"    校正次数: {len(details)}")
+                        report_lines.append(f"    最大校正: {max_correction:.6f}m")
+                        report_lines.append(f"    最小校正: {min_correction:.6f}m")
+                        report_lines.append(f"    平均校正: {avg_correction:.6f}m")
+                        report_lines.append(f"    最大绝对校正: {max_abs_correction:.6f}m")
+                        report_lines.append(f"    ROC CV: {details[0]['roc_cv']:.3f}")
+                        
+                        # 显示前5个校正详情
+                        report_lines.append("    校正详情 (前5个):")
+                        for i, detail in enumerate(details[:5]):
+                            report_lines.append(f"      {i+1}. 时间: {detail['time']}, 时间差: {detail['time_diff_seconds']:.1f}s, 校正: {detail['final_correction']:.6f}m")
+                        report_lines.append("")
+            else:
+                report_lines.append("3.1 系统级校正信息: 无")
+                report_lines.append("")
+            
+            # 3.2 个体级校正信息
+            if individual_level_high or individual_level_medium:
+                report_lines.append("3.2 个体级校正信息")
+                report_lines.append("-" * 30)
+                
+                # 合并所有个体级校正信息
+                all_individual = {**individual_level_high, **individual_level_medium}
+                report_lines.append(f"个体级校正 ({len(all_individual)}个卫星-频率组合):")
+                report_lines.append("-" * 25)
+                
+                for sat_freq, data in all_individual.items():
                     details = data['details'] if isinstance(data, dict) and 'details' in data else data
                     arcs = data['arcs'] if isinstance(data, dict) and 'arcs' in data else []
                     # 计算校正统计信息
@@ -1913,79 +2115,17 @@ class GNSSAnalyzer:
                     report_lines.append(f"    最小校正: {min_correction:.6f}m")
                     report_lines.append(f"    平均校正: {avg_correction:.6f}m")
                     report_lines.append(f"    最大绝对校正: {max_abs_correction:.6f}m")
-                    report_lines.append(f"    ROC CV: {details[0]['roc_cv']:.3f}")
+                    report_lines.append(f"    校正策略: 高质量策略")
                     
-                    
-                    # 显示前5个和后5个校正详情
+                    # 显示前5个校正详情
                     report_lines.append("    校正详情 (前5个):")
                     for i, detail in enumerate(details[:5]):
                         report_lines.append(f"      {i+1}. 时间: {detail['time']}, 时间差: {detail['time_diff_seconds']:.1f}s, 校正: {detail['final_correction']:.6f}m")
-                    
-                    if len(details) > 10:
-                        report_lines.append(f"      ... 还有 {len(details) - 10} 个校正记录")
-                        report_lines.append("    校正详情 (后5个):")
-                        for i, detail in enumerate(details[-5:], len(details)-4):
-                            report_lines.append(f"      {i}. 时间: {detail['time']}, 时间差: {detail['time_diff_seconds']:.1f}s, 校正: {detail['final_correction']:.6f}m")
-                    elif len(details) > 5:
-                        report_lines.append("    校正详情 (后5个):")
-                        for i, detail in enumerate(details[5:], 6):
-                            report_lines.append(f"      {i}. 时间: {detail['time']}, 时间差: {detail['time_diff_seconds']:.1f}s, 校正: {detail['final_correction']:.6f}m")
                     report_lines.append("")
             else:
-                report_lines.append("3.1 高质量校正信息: 无")
+                report_lines.append("3.2 个体级校正信息: 无")
                 report_lines.append("")
             
-            # 3.2 中等质量校正信息
-            if has_medium_quality:
-                medium_details = self.results['medium_quality_correction_details']
-                report_lines.append(f"3.2 中等质量校正信息 ({len(medium_details)}个卫星-频率组合):")
-                report_lines.append("-" * 30)
-                
-                for sat_freq, data in medium_details.items():
-                    details = data['details'] if isinstance(data, dict) and 'details' in data else data
-                    arcs = data['arcs'] if isinstance(data, dict) and 'arcs' in data else []
-                    # 计算校正统计信息
-                    corrections = [d['final_correction'] for d in details if d['final_correction'] is not None]
-                    if corrections:
-                        max_correction = max(corrections)
-                        min_correction = min(corrections)
-                        avg_correction = sum(corrections) / len(corrections)
-                        max_abs_correction = max(abs(max_correction), abs(min_correction))
-                    else:
-                        max_correction = min_correction = avg_correction = max_abs_correction = 0.0
-                    
-                    report_lines.append(f"  {sat_freq}:")
-                    report_lines.append(f"    校正次数: {len(details)}")
-                    report_lines.append(f"    最大校正: {max_correction:.6f}m")
-                    report_lines.append(f"    最小校正: {min_correction:.6f}m")
-                    report_lines.append(f"    平均校正: {avg_correction:.6f}m")
-                    report_lines.append(f"    最大绝对校正: {max_abs_correction:.6f}m")
-                    report_lines.append(f"    ROC CV: {details[0]['roc_cv']:.3f}")
-                    
-                    
-                    # 显示前5个和后5个校正详情
-                    report_lines.append("    校正详情 (前5个):")
-                    for i, detail in enumerate(details[:5]):
-                        report_lines.append(f"      {i+1}. 时间: {detail['time']}, 时间差: {detail['time_diff_seconds']:.1f}s")
-                        report_lines.append(f"         基础校正: {detail['base_correction']:.6f}m, 权重: {detail['weight']:.3f}, 时间权重: {detail['time_weight']:.3f}")
-                        report_lines.append(f"         最终校正: {detail['final_correction']:.6f}m")
-                    
-                    if len(details) > 10:
-                        report_lines.append(f"      ... 还有 {len(details) - 10} 个校正记录")
-                        report_lines.append("    校正详情 (后5个):")
-                        for i, detail in enumerate(details[-5:], len(details)-4):
-                            report_lines.append(f"      {i}. 时间: {detail['time']}, 时间差: {detail['time_diff_seconds']:.1f}s")
-                            report_lines.append(f"         基础校正: {detail['base_correction']:.6f}m, 权重: {detail['weight']:.3f}, 时间权重: {detail['time_weight']:.3f}")
-                            report_lines.append(f"         最终校正: {detail['final_correction']:.6f}m")
-                    elif len(details) > 5:
-                        report_lines.append("    校正详情 (后5个):")
-                        for i, detail in enumerate(details[5:], 6):
-                            report_lines.append(f"      {i}. 时间: {detail['time']}, 时间差: {detail['time_diff_seconds']:.1f}s")
-                            report_lines.append(f"         基础校正: {detail['base_correction']:.6f}m, 权重: {detail['weight']:.3f}, 时间权重: {detail['time_weight']:.3f}")
-                            report_lines.append(f"         最终校正: {detail['final_correction']:.6f}m")
-                    report_lines.append("")
-            else:
-                report_lines.append("3.2 中等质量校正信息: 无")
                 report_lines.append("")
         
         return "\n".join(report_lines)
@@ -3341,12 +3481,8 @@ class GNSSAnalyzer:
         """
         基于伪距、相位、多普勒双差检测结果，修改RINEX文件中的异常观测值
         """
-        # 各观测类型的最大阈值限制（根据观测精度设置）
-        max_threshold_limit = {
-            'code': 10.0,  # 伪距（米）
-            'phase': 3.0,  # 相位（米）
-            'doppler': 5.0  # 多普勒（米/秒）
-        }
+        # 各观测类型的最大阈值限制（使用用户设置的值）
+        max_threshold_limit = self.max_threshold_limits
 
         # 初始化日志内容
         log_content = [
@@ -4699,10 +4835,10 @@ def main():
     menubar = tk.Menu(root)
     root.config(menu=menubar)
 
-    # 剔除菜单
+    # 预处理菜单
     cleaning_menu = tk.Menu(menubar, tearoff=0)
-    menubar.add_cascade(label="剔除", menu=cleaning_menu)
-    cleaning_menu.add_command(label="执行剔除", command=lambda: show_cleaning_window(root))
+    menubar.add_cascade(label="预处理", menu=cleaning_menu)
+    cleaning_menu.add_command(label="执行预处理", command=lambda: show_cleaning_window(root))
 
     # 图表菜单
     charts_menu = tk.Menu(menubar, tearoff=0)
@@ -4727,7 +4863,7 @@ def main():
     desc_frame = ttk.LabelFrame(main_frame, text="功能说明", padding="20")
     desc_frame.pack(fill=tk.X, pady=20)
 
-    ttk.Label(desc_frame, text="• 剔除：基于伪距相位差值和历元间双差剔除异常观测值",
+    ttk.Label(desc_frame, text="• 预处理：基于历元间双差和CMC变化阈值剔除异常观测值，码相不一致性建模和校正",
               font=("Microsoft YaHei", 10)).pack(anchor=tk.W, pady=2)
     ttk.Label(desc_frame, text="• 图表：生成各类分析图表，支持单独保存和批量保存",
               font=("Microsoft YaHei", 10)).pack(anchor=tk.W, pady=2)
@@ -4741,7 +4877,7 @@ def main():
     quick_btn_frame = ttk.Frame(quick_frame)
     quick_btn_frame.pack()
 
-    ttk.Button(quick_btn_frame, text="开始剔除",
+    ttk.Button(quick_btn_frame, text="开始预处理",
                command=lambda: show_cleaning_window(root)).pack(side=tk.LEFT, padx=10)
     ttk.Button(quick_btn_frame, text="查看图表",
                command=lambda: show_charts_window(root)).pack(side=tk.LEFT, padx=10)
@@ -4770,16 +4906,16 @@ def main():
 
 
 def show_cleaning_window(parent):
-    """显示剔除功能窗口"""
+    """显示数据预处理功能窗口"""
     cleaning_window = tk.Toplevel(parent)
-    cleaning_window.title("数据剔除")
-    cleaning_window.geometry("700x500")
+    cleaning_window.title("数据预处理")
+    cleaning_window.geometry("700x600")
     cleaning_window.resizable(True, True)
     cleaning_window.transient(parent)
     cleaning_window.grab_set()
     
     # 居中显示窗口
-    center_window(cleaning_window, 700, 500)
+    center_window(cleaning_window, 700, 600)
 
     # 主框架
     main_frame = ttk.Frame(cleaning_window, padding="20")
@@ -4842,14 +4978,47 @@ def show_cleaning_window(parent):
     param_frame = ttk.LabelFrame(main_frame, text="参数设置", padding="10")
     param_frame.pack(fill=tk.X, pady=10)
 
-    # 阈值设置
+    # 历元间双差最大阈值设置
+    double_diff_frame = ttk.Frame(param_frame)
+    double_diff_frame.pack(fill=tk.X, pady=5)
+
+    ttk.Label(double_diff_frame, text="历元间双差最大阈值:").pack(side=tk.LEFT)
+    
+    # 伪距阈值
+    ttk.Label(double_diff_frame, text="伪距(米):").pack(side=tk.LEFT, padx=(10, 0))
+    code_threshold_var = tk.DoubleVar(value=10.0)
+    code_threshold_entry = ttk.Entry(double_diff_frame, textvariable=code_threshold_var, width=8)
+    code_threshold_entry.pack(side=tk.LEFT, padx=(5, 0))
+    
+    # 相位阈值
+    ttk.Label(double_diff_frame, text="相位(米):").pack(side=tk.LEFT, padx=(10, 0))
+    phase_threshold_var = tk.DoubleVar(value=3.0)
+    phase_threshold_entry = ttk.Entry(double_diff_frame, textvariable=phase_threshold_var, width=8)
+    phase_threshold_entry.pack(side=tk.LEFT, padx=(5, 0))
+    
+    # 多普勒阈值
+    ttk.Label(double_diff_frame, text="多普勒(米/秒):").pack(side=tk.LEFT, padx=(10, 0))
+    doppler_threshold_var = tk.DoubleVar(value=5.0)
+    doppler_threshold_entry = ttk.Entry(double_diff_frame, textvariable=doppler_threshold_var, width=8)
+    doppler_threshold_entry.pack(side=tk.LEFT, padx=(5, 0))
+
+    # CMC变化阈值设置
     threshold_frame = ttk.Frame(param_frame)
     threshold_frame.pack(fill=tk.X, pady=5)
 
-    ttk.Label(threshold_frame, text="伪距相位差值阈值(米):").pack(side=tk.LEFT)
+    ttk.Label(threshold_frame, text="CMC变化阈值(米):").pack(side=tk.LEFT)
     threshold_var = tk.DoubleVar(value=5.0)
     threshold_entry = ttk.Entry(threshold_frame, textvariable=threshold_var, width=10)
     threshold_entry.pack(side=tk.LEFT, padx=(10, 0))
+
+    # R方阈值设置
+    r_squared_frame = ttk.Frame(param_frame)
+    r_squared_frame.pack(fill=tk.X, pady=5)
+
+    ttk.Label(r_squared_frame, text="R方阈值:").pack(side=tk.LEFT)
+    r_squared_var = tk.DoubleVar(value=0.5)
+    r_squared_entry = ttk.Entry(r_squared_frame, textvariable=r_squared_var, width=10)
+    r_squared_entry.pack(side=tk.LEFT, padx=(10, 0))
 
     # 进度显示
     progress_frame = ttk.LabelFrame(main_frame, text="处理进度", padding="10")
@@ -4885,6 +5054,16 @@ def show_cleaning_window(parent):
                 file_path = file_var.get()
                 analyzer.input_file_path = file_path
                 analyzer.current_result_dir = os.path.join(os.path.dirname(file_path), "analysis_results")
+                
+                # 设置R方阈值
+                analyzer.r_squared_threshold = r_squared_var.get()
+                
+                # 设置历元间双差最大阈值
+                analyzer.max_threshold_limits = {
+                    'code': code_threshold_var.get(),
+                    'phase': phase_threshold_var.get(),
+                    'doppler': doppler_threshold_var.get()
+                }
 
                 # 更新状态
                 status_var.set("正在读取RINEX文件...")
@@ -4952,7 +5131,7 @@ def show_cleaning_window(parent):
 
                 # 显示结果
                 result_dir = analyzer.current_result_dir
-                message = f"数据剔除完成！\n结果保存在：{result_dir}"
+                message = f"数据预处理完成！\n结果保存在：{result_dir}"
                 if receiver_file_var.get() and 'cci_results' in locals():
                     # 显示码相不一致性建模和校正的实际文件路径
                     corrected_file_path = cci_results.get('corrected_rinex_path', '')
@@ -4976,7 +5155,7 @@ def show_cleaning_window(parent):
         thread.daemon = True
         thread.start()
 
-    start_btn = ttk.Button(button_frame, text="开始剔除", command=start_cleaning)
+    start_btn = ttk.Button(button_frame, text="开始预处理", command=start_cleaning)
     start_btn.pack(side=tk.LEFT, padx=10)
 
     select_btn = ttk.Button(button_frame, text="选择文件", command=select_phone_file)
