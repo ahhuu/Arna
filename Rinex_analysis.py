@@ -22,12 +22,16 @@ class GNSSAnalyzer:
     def __init__(self):
         # 定义GNSS信号频率 (Hz)
         self.r_squared_threshold = 0.5  # R方阈值，默认0.5
+        self.cv_threshold = 0.5  # CV值阈值，默认0.5
         # 历元间双差最大阈值限制
         self.max_threshold_limits = {
             'code': 10.0,    # 伪距（米）
             'phase': 3.0,    # 相位（米）
             'doppler': 5.0   # 多普勒（米/秒）
         }
+        # 手机独有卫星分析配置
+        self.enable_phone_only_analysis = False  # 是否启用手机独有卫星分析
+        self.phone_only_min_data_points = 20     # 手机独有卫星最小数据点数
         self.frequencies = {
             'G': {'L1C': 1575.42e6, 'L5Q': 1176.45e6},  # GPS
             'R': {'L1C': 1602e6, 'L5Q': 1246e6},  # GLONASS
@@ -1076,6 +1080,13 @@ class GNSSAnalyzer:
             if sat_id in phone_cmc:
                 total_combinations += len(set(receiver_cmc[sat_id].keys()) & set(phone_cmc[sat_id].keys()))
         
+        # 如果启用手机独有卫星分析，统计手机独有卫星
+        phone_only_combinations = 0
+        if self.enable_phone_only_analysis:
+            for sat_id in phone_cmc.keys():
+                if sat_id not in receiver_cmc:
+                    phone_only_combinations += len(phone_cmc[sat_id].keys())
+            total_combinations += phone_only_combinations
         
         for sat_id in receiver_cmc.keys():
             if sat_id not in phone_cmc:
@@ -1185,10 +1196,25 @@ class GNSSAnalyzer:
                 
             if sat_dcmc:
                 dcmc_results[sat_id] = sat_dcmc
-                
+        
+        # 处理手机独有卫星（如果启用）
+        phone_only_processed = 0
+        if self.enable_phone_only_analysis:
+            print(f"开始处理手机独有卫星分析...")
+            print(f"检测到线性漂移的手机独有卫星:")
+            for sat_id in phone_cmc.keys():
+                if sat_id not in receiver_cmc:
+                    phone_freqs = phone_cmc[sat_id]
+                    for freq, phone_data in phone_freqs.items():
+                        self._handle_phone_only_satellite(sat_id, freq, phone_data)
+                        phone_only_processed += 1
+                        self.update_progress(int((processed_combinations + phone_only_processed) / max(total_combinations, 1) * 100))
+        
         print(f"dCMC计算完成:")
         print(f"  总组合数: {total_combinations}")
-        print(f"  通过线性漂移检查: {processed_combinations}")
+        print(f"  共视卫星通过线性漂移检查: {processed_combinations}")
+        if self.enable_phone_only_analysis:
+            print(f"  手机独有卫星处理数: {phone_only_processed}")
         print(f"  被过滤组合数: {filtered_combinations}")
         
         # 存储线性漂移检测详细信息
@@ -1223,6 +1249,8 @@ class GNSSAnalyzer:
         cci_results = {}
         total_sats = len(dcmc_data)
         processed_sats = 0
+        
+        print(f"  正在处理 {len(dcmc_data)} 个卫星的CCI序列提取...")
         
         for sat_id, freq_data in dcmc_data.items():
             sat_cci = {}
@@ -1380,10 +1408,10 @@ class GNSSAnalyzer:
                     roc_cv = float('inf') if std_roc > 0 else 0.0
                 
                 # 质量等级判断（只针对系统级模型）
-                if roc_cv < 0.5 and len(roc_values) >= 3:
+                if roc_cv < self.cv_threshold and len(roc_values) >= 3:
                     quality_level = "高质量"
                     is_high_quality = True
-                elif 0.5 <= roc_cv < 1.0 and len(roc_values) >= 3:
+                elif self.cv_threshold <= roc_cv < 1.0 and len(roc_values) >= 3:
                     quality_level = "中等质量"
                     is_high_quality = False
                 else:
@@ -1392,7 +1420,7 @@ class GNSSAnalyzer:
                     is_high_quality = True
                 
                 # 根据CV值决定使用系统级还是个体级ROC模型
-                if roc_cv < 0.5 and len(roc_values) >= 3:
+                if roc_cv < self.cv_threshold and len(roc_values) >= 3:
                     # CV<0.5且数据点≥3：使用系统级ROC模型
                     roc_results[system_freq_key] = {
                         'roc_rate': mean_roc,  # 单位: m/s
@@ -1406,32 +1434,64 @@ class GNSSAnalyzer:
                         'model_type': 'system_level'  # 系统级模型
                     }
                 else:
-                    # CV≥0.5或数据点<3：为每个卫星建立个体ROC模型
-                    if roc_cv >= 0.5:
-                        print(f"系统-频率 {system_freq_key} CV值过高({roc_cv:.3f}≥0.5)，建立个体ROC模型")
+                    # CV≥阈值或数据点<3：为每个卫星建立个体ROC模型
+                    if roc_cv >= self.cv_threshold:
+                        print(f"系统-频率 {system_freq_key} CV值过高({roc_cv:.3f}≥{self.cv_threshold:.1f})，建立个体ROC模型")
                     else:
                         print(f"系统-频率 {system_freq_key} 数据点不足({len(roc_values)}<3)，建立个体ROC模型")
+                    
+                    # 为个体级模型计算CV值（如果卫星数>=3）
+                    individual_cv = 0.0
+                    if len(roc_values) >= 3:
+                        individual_cv = roc_cv  # 使用已计算的CV值
                     
                     for sat_id, individual_roc in individual_rocs[system_freq_key].items():
                         individual_key = f"{sat_id}_{system_freq_key.split('_')[1]}"  # 如: E04_L7Q
                         individual_roc_models[individual_key] = {
                             'roc_rate': individual_roc,  # 单位: m/s
-                            'roc_std': 0.0,  # 个体模型无标准差
-                            'roc_cv': 0.0,  # 个体模型无变异系数
+                            'roc_std': std_roc if len(roc_values) >= 3 else 0.0,  # 如果卫星数>=3，保存标准差
+                            'roc_cv': individual_cv,  # 如果卫星数>=3，保存CV值
                             'quality_level': "个体级",  # 个体级质量
                             'is_high_quality': True,  # 个体级默认为高质量
                             'contributing_sats': [sat_id],
                             'individual_rocs': {sat_id: individual_roc},
                             'num_satellites': 1,
-                            'model_type': 'individual_level'  # 个体级模型
+                            'model_type': 'individual_level',  # 个体级模型
+                            'system_freq_cv': individual_cv,  # 系统-频率组合的CV值
+                            'system_freq_satellites': len(roc_values)  # 系统-频率组合的卫星数
                         }
         
-        # 合并系统级和个体级ROC模型
-        all_roc_models = {**roc_results, **individual_roc_models}
+        # 处理手机独有卫星的ROC模型（如果启用）
+        phone_only_roc_models = {}
+        if self.enable_phone_only_analysis and 'phone_only_linear_drift' in self.results:
+            print(f"开始建立手机独有卫星ROC模型...")
+            phone_only_data = self.results['phone_only_linear_drift']
+            
+            for sat_freq_key, drift_info in phone_only_data.items():
+                if drift_info['status'] == '有线性漂移':
+                    # 为手机独有卫星建立个体ROC模型
+                    phone_only_roc_models[sat_freq_key] = {
+                        'roc_rate': drift_info['slope'],  # 使用斜率作为ROC
+                        'roc_std': 0.0,  # 个体模型无标准差
+                        'roc_cv': 0.0,   # 个体模型无变异系数
+                        'quality_level': "个体级",  # 个体级质量
+                        'is_high_quality': True,  # 个体级默认为高质量
+                        'contributing_sats': [sat_freq_key.split('_')[0]],  # 单个卫星
+                        'individual_rocs': {sat_freq_key.split('_')[0]: drift_info['slope']},
+                        'num_satellites': 1,
+                        'model_type': 'individual_level',  # 个体级模型
+                        'data_source': 'phone_only'  # 标记数据来源
+                    }
+            
+            print(f"手机独有卫星ROC模型建立完成: {len(phone_only_roc_models)} 个")
+        
+        # 合并系统级、个体级和手机独有卫星ROC模型
+        all_roc_models = {**roc_results, **individual_roc_models, **phone_only_roc_models}
         self.results['roc_model'] = all_roc_models
         self.results['individual_roc_models'] = individual_roc_models
+        self.results['phone_only_roc_models'] = phone_only_roc_models
         
-        print(f"ROC模型计算完成: 系统级模型 {len(roc_results)} 个, 个体级模型 {len(individual_roc_models)} 个")
+        print(f"ROC模型计算完成: 系统级模型 {len(roc_results)} 个, 个体级模型 {len(individual_roc_models)} 个, 手机独有卫星模型 {len(phone_only_roc_models)} 个")
         return all_roc_models
 
     def _linear_fit(self, x_values, y_values):
@@ -1453,6 +1513,57 @@ class GNSSAnalyzer:
         intercept = (sum_y - slope * sum_x) / n
         
         return slope, intercept
+
+    def _handle_phone_only_satellite(self, sat_id: str, freq: str, phone_data: Dict):
+        """处理手机独有卫星的码相不一致性检测
+        
+        参数:
+            sat_id: 卫星ID
+            freq: 频率
+            phone_data: 手机观测数据
+        """
+        # 检查手机CMC是否存在明显线性漂移
+        phone_times = phone_data['times']
+        phone_cmc_values = phone_data['code_phase_diff']
+        
+        # 过滤None值
+        valid_indices = [i for i, val in enumerate(phone_cmc_values) if val is not None]
+        if len(valid_indices) < self.phone_only_min_data_points:
+            return
+            
+        # 提取有效数据
+        valid_times = [phone_times[i] for i in valid_indices]
+        valid_cmc_values = [phone_cmc_values[i] for i in valid_indices]
+        
+        # 进行线性漂移检测
+        try:
+            phone_cmc_linear_trend = self._check_linear_trend(
+                valid_times, valid_cmc_values, self.r_squared_threshold
+            )
+            
+            # 存储手机独有卫星的线性漂移信息
+            sat_freq_key = f"{sat_id}_{freq}"
+            if 'phone_only_linear_drift' not in self.results:
+                self.results['phone_only_linear_drift'] = {}
+                
+            self.results['phone_only_linear_drift'][sat_freq_key] = {
+                'status': '有线性漂移' if phone_cmc_linear_trend['has_linear_drift'] else '无线性漂移',
+                'r_squared': phone_cmc_linear_trend['r_squared'],
+                'slope': phone_cmc_linear_trend['slope'],
+                'intercept': phone_cmc_linear_trend['intercept'],
+                'data_points': len(valid_cmc_values),
+                'min_r_squared': self.r_squared_threshold,
+                'min_slope_magnitude': 1e-6,
+                'data_source': 'phone_only'  # 标记数据来源
+            }
+            
+            if phone_cmc_linear_trend['has_linear_drift']:
+                print(f"  {sat_freq_key}: R²={phone_cmc_linear_trend['r_squared']:.6f}, "
+                      f"斜率={phone_cmc_linear_trend['slope']:.6e} m/s, "
+                      f"数据点={len(valid_cmc_values)}")
+                      
+        except Exception as e:
+            print(f"手机独有卫星 {sat_id}_{freq} 线性漂移检测失败: {e}")
 
     def _identify_continuous_arcs(self, times, values, max_gap_seconds=300, sat_freq_info=""):
         """识别连续弧段，基于时间间隔分割
@@ -1489,7 +1600,8 @@ class GNSSAnalyzer:
                 # 弧段分割策略：仅基于时间间隔
                 if time_diff > max_gap_seconds:
                     # 时间间隔过大（>5分钟），分割弧段
-                    print(f"弧段分割 - 时间间隔: {time_diff:.1f}s > {max_gap_seconds}s, 时间: {time}, 卫星频率: {sat_freq_info}")
+                    if sat_freq_info:  # 只在有卫星频率信息时输出
+                        print(f"  弧段分割: {sat_freq_info} 时间间隔 {time_diff:.1f}s > {max_gap_seconds}s")
                     arcs.append({
                         'times': current_arc_times,
                         'values': current_arc_values,
@@ -1598,8 +1710,13 @@ class GNSSAnalyzer:
         
         # 显示ROC模型总结信息
         print(f"ROC模型包含 {len(roc_model)} 个系统-频率组合")
-        for system_freq_key, roc_info in roc_model.items():
-            print(f"  {system_freq_key}: ROC = {roc_info['roc_rate']:.6e} m/s, 参与卫星数 = {roc_info['num_satellites']}")
+        # 只显示前5个ROC模型作为示例
+        for i, (system_freq_key, roc_info) in enumerate(roc_model.items()):
+            if i < 5:
+                print(f"  {system_freq_key}: ROC = {roc_info['roc_rate']:.6e} m/s, 参与卫星数 = {roc_info['num_satellites']}")
+            elif i == 5:
+                print(f"  ... 还有 {len(roc_model) - 5} 个ROC模型")
+                break
         
         processed_combinations = 0
         total_combinations = len(valid_combinations)
@@ -1651,7 +1768,7 @@ class GNSSAnalyzer:
                 
                 # 识别连续弧段（用于确定t0）
                 sat_freq_info = f"{sat_id}_{freq}"
-                arcs = self._identify_continuous_arcs(times, original_phase_m, sat_freq_info=sat_freq_info)
+                arcs = self._identify_continuous_arcs(times, original_phase_m, sat_freq_info="")  # 不输出弧段分割信息
                 
                 corrected_phase_m = []
                 correction_applied = []
@@ -1659,6 +1776,7 @@ class GNSSAnalyzer:
                 # 存储校正的详细信息
                 medium_quality_details = []
                 high_quality_details = []
+                individual_level_details = []
                 
                 # 存储弧段信息用于报告
                 arc_info = []
@@ -1767,7 +1885,7 @@ class GNSSAnalyzer:
                                 correction = base_correction
                             
                             # 记录个体级校正详情
-                            high_quality_details.append({
+                            individual_level_details.append({
                                 'time': t,
                                 'time_diff_seconds': time_diff_seconds,
                                 'base_correction': base_correction,
@@ -1800,6 +1918,14 @@ class GNSSAnalyzer:
                         'arcs': arc_info
                     }
                 
+                if individual_level_details:
+                    if 'individual_level_correction_details' not in self.results:
+                        self.results['individual_level_correction_details'] = {}
+                    self.results['individual_level_correction_details'][f"{sat_id}_{freq}"] = {
+                        'details': individual_level_details,
+                        'arcs': arc_info
+                    }
+                
                 if corrected_phase_m:
                     sat_corrected[freq] = {
                         'times': times,
@@ -1826,10 +1952,77 @@ class GNSSAnalyzer:
             for freq_data in sat_data.values()
         )
         
+        # 处理手机独有卫星的载波相位校正（如果启用）
+        phone_only_corrected = 0
+        if self.enable_phone_only_analysis and 'phone_only_roc_models' in self.results:
+            print(f"\n开始校正手机独有卫星载波相位...")
+            phone_only_models = self.results['phone_only_roc_models']
+            
+            for sat_freq_key, roc_info in phone_only_models.items():
+                sat_id, freq = sat_freq_key.split('_', 1)
+                
+                # 检查手机观测数据中是否有该卫星-频率组合
+                if sat_id in self.observations_meters and freq in self.observations_meters[sat_id]:
+                    phone_data = self.observations_meters[sat_id][freq]
+                    times = phone_data['times']
+                    original_phase = phone_data['phase']
+                    
+                    if not original_phase:
+                        continue
+                    
+                    # 使用手机独有卫星的ROC进行校正
+                    roc_rate = roc_info['roc_rate']
+                    corrected_phase = []
+                    correction_applied = []
+                    
+                    # 获取波长信息
+                    wavelengths = phone_data.get('wavelength', [])
+                    if not wavelengths:
+                        # 如果没有波长信息，使用默认波长
+                        sat_system = sat_id[0]
+                        default_wavelengths = self.wavelengths.get(sat_system, {})
+                        wavelength = default_wavelengths.get(freq)
+                        wavelengths = [wavelength] * len(times) if wavelength else [None] * len(times)
+                    
+                    # 使用第一个时间作为t0
+                    t0 = times[0]
+                    
+                    for i, (t, phase_val) in enumerate(zip(times, original_phase)):
+                        if phase_val is not None:
+                            time_diff = (t - t0).total_seconds()
+                            correction = roc_rate * time_diff
+                            corrected_phase.append(phase_val + correction)
+                            correction_applied.append(correction)
+                        else:
+                            corrected_phase.append(None)
+                            correction_applied.append(0.0)
+                    
+                    # 存储校正结果
+                    if sat_id not in corrected_results:
+                        corrected_results[sat_id] = {}
+                    
+                    corrected_results[sat_id][freq] = {
+                        'times': times,
+                        'original_phase': original_phase,
+                        'corrected_phase': corrected_phase,
+                        'correction_applied': correction_applied,
+                        'wavelengths': wavelengths,
+                        'roc_rate': roc_rate,
+                        'model_type': 'phone_only',
+                        'data_source': 'phone_only'
+                    }
+                    
+                    phone_only_corrected += 1
+                    print(f"  校正手机独有卫星 {sat_freq_key}: ROC={roc_rate:.6e} m/s")
+            
+            print(f"手机独有卫星校正完成: {phone_only_corrected} 个组合")
+        
         print(f"\n载波相位校正完成:")
         print(f"  校正卫星数: {total_corrected_sats}")
         print(f"  校正组合数: {total_corrected_combinations}")
         print(f"  校正观测值数: {total_corrected_obs}")
+        if self.enable_phone_only_analysis:
+            print(f"  手机独有卫星校正组合数: {phone_only_corrected}")
         
         # 显示个位数秒数校正统计
         if hasattr(self, '_debug_single_digit_count'):
@@ -1888,63 +2081,81 @@ class GNSSAnalyzer:
                 report_lines.append("  无")
             report_lines.append("")
         
+        # 1.3 手机独有卫星线性漂移检测结果
+        if 'phone_only_linear_drift' in self.results and self.results['phone_only_linear_drift']:
+            report_lines.append("1.3 手机独有卫星线性漂移检测结果")
+            report_lines.append("-" * 50)
+            phone_only_data = self.results['phone_only_linear_drift']
+            
+            # 分离有线性漂移和无线性漂移的手机独有卫星
+            phone_has_drift = []
+            phone_no_drift = []
+            
+            for sat_freq, drift_info in phone_only_data.items():
+                if drift_info['status'] == '有线性漂移':
+                    phone_has_drift.append((sat_freq, drift_info))
+                else:
+                    phone_no_drift.append((sat_freq, drift_info))
+            
+            # 有线性漂移的手机独有卫星
+            report_lines.append(f"1.3.1 检测到线性漂移的手机独有卫星 ({len(phone_has_drift)}个):")
+            report_lines.append("-" * 30)
+            if phone_has_drift:
+                for sat_freq, drift_info in phone_has_drift:
+                    report_lines.append(f"  {sat_freq}: R²={drift_info['r_squared']:.6f}, 斜率={drift_info['slope']:.6e} m/s, 数据点={drift_info['data_points']}")
+            else:
+                report_lines.append("  无")
+            report_lines.append("")
+            
+            # 无线性漂移的手机独有卫星
+            report_lines.append(f"1.3.2 未检测到线性漂移的手机独有卫星 ({len(phone_no_drift)}个):")
+            report_lines.append("-" * 30)
+            if phone_no_drift:
+                for sat_freq, drift_info in phone_no_drift:
+                    report_lines.append(f"  {sat_freq}: R²={drift_info['r_squared']:.6f}, 斜率={drift_info['slope']:.6e} m/s, 数据点={drift_info['data_points']}")
+            else:
+                report_lines.append("  无")
+            report_lines.append("")
+        
         # 2. ROC模型质量分析
         if 'roc_model' in self.results:
             report_lines.append("2. ROC模型质量分析")
             report_lines.append("-" * 50)
             roc_model = self.results['roc_model']
             
-            # 按质量等级和模型类型分组
-            high_quality_system = []
-            medium_quality_system = []
+            # 按模型类型分组
+            system_models = []
             individual_models = []
             
             for system_freq, roc_info in roc_model.items():
-                quality = roc_info['quality_level']
                 model_type = roc_info.get('model_type', 'system_level')
                 
                 if model_type == 'individual_level':
                     individual_models.append((system_freq, roc_info))
-                elif quality == "高质量":
-                    high_quality_system.append((system_freq, roc_info))
-                elif quality == "中等质量":
-                    medium_quality_system.append((system_freq, roc_info))
+                else:
+                    system_models.append((system_freq, roc_info))
             
-            # 显示质量判断标准和模型选择策略（只显示一次）
-            report_lines.append("系统级模型质量判断: CV<0.5(高质量), 0.5≤CV<1.0(中等质量)")
-            report_lines.append("模型选择策略: CV<0.5且数据点≥3→系统级模型, CV≥0.5或数据点<3→个体级模型")
+            # 显示模型选择策略
+            report_lines.append(f"模型选择策略: CV<{self.cv_threshold}且数据点≥3→系统级模型, CV≥{self.cv_threshold}或数据点<3→个体级模型")
             report_lines.append("")
             
-            # 高质量系统级ROC模型
-            report_lines.append(f"2.1 高质量系统级ROC模型 ({len(high_quality_system)}个):")
+            # 系统级ROC模型
+            report_lines.append(f"2.1 系统级ROC模型 ({len(system_models)}个):")
             report_lines.append("-" * 30)
-            if high_quality_system:
-                for system_freq, roc_info in high_quality_system:
+            if system_models:
+                for system_freq, roc_info in system_models:
                     parts = system_freq.split('_', 1)
                     system_name = {'G': 'GPS', 'R': 'GLONASS', 'E': 'Galileo', 'C': 'BDS', 'J': 'QZSS', 'I': 'IRNSS'}.get(parts[0], parts[0])
                     contributing_sats = roc_info['contributing_sats']
-                    report_lines.append(f"  {system_name} {parts[1]}: ROC={roc_info['roc_rate']:.6e} m/s, CV={roc_info['roc_cv']:.3f}")
-                    report_lines.append(f"    参与卫星 ({len(contributing_sats)}个): {', '.join(contributing_sats)}")
-            else:
-                report_lines.append("  无")
-            report_lines.append("")
-            
-            # 中等质量系统级ROC模型
-            report_lines.append(f"2.2 中等质量系统级ROC模型 ({len(medium_quality_system)}个):")
-            report_lines.append("-" * 30)
-            if medium_quality_system:
-                for system_freq, roc_info in medium_quality_system:
-                    parts = system_freq.split('_', 1)
-                    system_name = {'G': 'GPS', 'R': 'GLONASS', 'E': 'Galileo', 'C': 'BDS', 'J': 'QZSS', 'I': 'IRNSS'}.get(parts[0], parts[0])
-                    contributing_sats = roc_info['contributing_sats']
-                    report_lines.append(f"  {system_name} {parts[1]}: ROC={roc_info['roc_rate']:.6e} m/s, CV={roc_info['roc_cv']:.3f}")
+                    quality = roc_info['quality_level']
+                    report_lines.append(f"  {system_name} {parts[1]}: ROC={roc_info['roc_rate']:.6e} m/s, CV={roc_info['roc_cv']:.3f} ({quality})")
                     report_lines.append(f"    参与卫星 ({len(contributing_sats)}个): {', '.join(contributing_sats)}")
             else:
                 report_lines.append("  无")
             report_lines.append("")
             
             # 个体级ROC模型
-            report_lines.append(f"2.3 个体级ROC模型 ({len(individual_models)}个):")
+            report_lines.append(f"2.2 个体级ROC模型 ({len(individual_models)}个):")
             report_lines.append("-" * 30)
             if individual_models:
                 # 按卫星系统分组显示
@@ -1960,19 +2171,63 @@ class GNSSAnalyzer:
                 for system, sats in individual_by_system.items():
                     system_name = {'G': 'GPS', 'R': 'GLONASS', 'E': 'Galileo', 'C': 'BDS', 'J': 'QZSS', 'I': 'IRNSS'}.get(system, system)
                     report_lines.append(f"  {system_name}系统:")
+                    
+                    # 按频率分组，显示CV值
+                    freq_groups = {}
                     for sat_id, freq, roc_info in sats:
-                        report_lines.append(f"    {sat_id} {freq}: ROC={roc_info['roc_rate']:.6e} m/s")
+                        if freq not in freq_groups:
+                            freq_groups[freq] = []
+                        freq_groups[freq].append((sat_id, roc_info))
+                    
+                    for freq, freq_sats in freq_groups.items():
+                        # 检查是否有CV值信息
+                        has_cv_info = any('system_freq_cv' in roc_info and roc_info['system_freq_cv'] > 0 for _, roc_info in freq_sats)
+                        
+                        if has_cv_info:
+                            # 获取CV值（所有卫星的CV值应该相同）
+                            cv_value = next(roc_info['system_freq_cv'] for _, roc_info in freq_sats if 'system_freq_cv' in roc_info and roc_info['system_freq_cv'] > 0)
+                            sat_count = next(roc_info['system_freq_satellites'] for _, roc_info in freq_sats if 'system_freq_satellites' in roc_info)
+                            report_lines.append(f"    {freq} (CV={cv_value:.3f}, {sat_count}个卫星):")
+                        else:
+                            report_lines.append(f"    {freq}:")
+                        
+                        for sat_id, roc_info in freq_sats:
+                            report_lines.append(f"      {sat_id}: ROC={roc_info['roc_rate']:.6e} m/s")
             else:
                 report_lines.append("  无")
             report_lines.append("")
+            
+            # 手机独有卫星ROC模型
+            if 'phone_only_roc_models' in self.results and self.results['phone_only_roc_models']:
+                report_lines.append(f"2.4 手机独有卫星ROC模型 ({len(self.results['phone_only_roc_models'])}个):")
+                report_lines.append("-" * 30)
+                phone_only_models = self.results['phone_only_roc_models']
+                
+                # 按卫星系统分组显示
+                phone_only_by_system = {}
+                for sat_freq, roc_info in phone_only_models.items():
+                    sat_id = sat_freq.split('_')[0]
+                    freq = sat_freq.split('_')[1]
+                    system = sat_id[0]
+                    if system not in phone_only_by_system:
+                        phone_only_by_system[system] = []
+                    phone_only_by_system[system].append((sat_id, freq, roc_info))
+                
+                for system, sats in phone_only_by_system.items():
+                    system_name = {'G': 'GPS', 'R': 'GLONASS', 'E': 'Galileo', 'C': 'BDS', 'J': 'QZSS', 'I': 'IRNSS'}.get(system, system)
+                    report_lines.append(f"  {system_name}系统:")
+                    for sat_id, freq, roc_info in sats:
+                        report_lines.append(f"    {sat_id} {freq}: ROC={roc_info['roc_rate']:.6e} m/s (手机独有)")
+                report_lines.append("")
             
             report_lines.append("")
         
         # 3. 载波相位校正详细信息
         has_high_quality = 'high_quality_correction_details' in self.results
         has_medium_quality = 'medium_quality_correction_details' in self.results
+        has_individual_level = 'individual_level_correction_details' in self.results
         
-        if has_high_quality or has_medium_quality:
+        if has_high_quality or has_medium_quality or has_individual_level:
             report_lines.append("3. 载波相位校正详细信息")
             report_lines.append("-" * 50)
             
@@ -1982,106 +2237,61 @@ class GNSSAnalyzer:
             system_level_medium = {}
             individual_level_medium = {}
             
+            # 处理系统级校正信息
             if has_high_quality:
-                high_details = self.results['high_quality_correction_details']
-                for sat_freq, data in high_details.items():
-                    details = data['details'] if isinstance(data, dict) and 'details' in data else data
-                    if details:
-                        model_type = details[0].get('model_type', 'system_level')
-                        if model_type == 'individual_level':
-                            individual_level_high[sat_freq] = data
-                        else:
-                            system_level_high[sat_freq] = data
+                system_level_high = self.results['high_quality_correction_details']
             
             if has_medium_quality:
-                medium_details = self.results['medium_quality_correction_details']
-                for sat_freq, data in medium_details.items():
-                    details = data['details'] if isinstance(data, dict) and 'details' in data else data
-                    if details:
-                        model_type = details[0].get('model_type', 'system_level')
-                        if model_type == 'individual_level':
-                            individual_level_medium[sat_freq] = data
-                        else:
-                            system_level_medium[sat_freq] = data
+                system_level_medium = self.results['medium_quality_correction_details']
+            
+            # 处理个体级校正详情
+            if has_individual_level:
+                individual_level_high = self.results['individual_level_correction_details']
             
             # 3.1 系统级校正信息
             if system_level_high or system_level_medium:
                 report_lines.append("3.1 系统级校正信息")
                 report_lines.append("-" * 30)
                 
-                # 3.1.1 高质量系统级校正
-                if system_level_high:
-                    report_lines.append(f"3.1.1 高质量系统级校正 ({len(system_level_high)}个卫星-频率组合):")
-                    report_lines.append("-" * 25)
-                    
-                    for sat_freq, data in system_level_high.items():
-                        details = data['details'] if isinstance(data, dict) and 'details' in data else data
-                        arcs = data['arcs'] if isinstance(data, dict) and 'arcs' in data else []
-                        # 计算校正统计信息
-                        corrections = [d['final_correction'] for d in details if d['final_correction'] is not None]
-                        if corrections:
-                            max_correction = max(corrections)
-                            min_correction = min(corrections)
-                            avg_correction = sum(corrections) / len(corrections)
-                            max_abs_correction = max(abs(max_correction), abs(min_correction))
-                        else:
-                            max_correction = min_correction = avg_correction = max_abs_correction = 0.0
-                        
-                        report_lines.append(f"  {sat_freq}:")
-                        report_lines.append(f"    校正次数: {len(details)}")
-                        report_lines.append(f"    最大校正: {max_correction:.6f}m")
-                        report_lines.append(f"    最小校正: {min_correction:.6f}m")
-                        report_lines.append(f"    平均校正: {avg_correction:.6f}m")
-                        report_lines.append(f"    最大绝对校正: {max_abs_correction:.6f}m")
-                        report_lines.append(f"    ROC CV: {details[0]['roc_cv']:.3f}")
-                        
-                        # 显示前5个和后5个校正详情
-                        report_lines.append("    校正详情 (前5个):")
-                        for i, detail in enumerate(details[:5]):
-                            report_lines.append(f"      {i+1}. 时间: {detail['time']}, 时间差: {detail['time_diff_seconds']:.1f}s, 校正: {detail['final_correction']:.6f}m")
-                        
-                        if len(details) > 10:
-                            report_lines.append(f"      ... 还有 {len(details) - 10} 个校正记录")
-                            report_lines.append("    校正详情 (后5个):")
-                            for i, detail in enumerate(details[-5:], len(details)-4):
-                                report_lines.append(f"      {i}. 时间: {detail['time']}, 时间差: {detail['time_diff_seconds']:.1f}s, 校正: {detail['final_correction']:.6f}m")
-                        elif len(details) > 5:
-                            report_lines.append("    校正详情 (后5个):")
-                            for i, detail in enumerate(details[5:], 6):
-                                report_lines.append(f"      {i}. 时间: {detail['time']}, 时间差: {detail['time_diff_seconds']:.1f}s, 校正: {detail['final_correction']:.6f}m")
-                        report_lines.append("")
+                # 合并所有系统级校正信息
+                all_system = {**system_level_high, **system_level_medium}
+                report_lines.append(f"系统级校正 ({len(all_system)}个卫星-频率组合):")
+                report_lines.append("-" * 35)
                 
-                # 3.1.2 中等质量系统级校正
-                if system_level_medium:
-                    report_lines.append(f"3.1.2 中等质量系统级校正 ({len(system_level_medium)}个卫星-频率组合):")
-                    report_lines.append("-" * 25)
+                for sat_freq, data in all_system.items():
+                    details = data['details'] if isinstance(data, dict) and 'details' in data else data
+                    arcs = data['arcs'] if isinstance(data, dict) and 'arcs' in data else []
+                    # 计算校正统计信息
+                    corrections = [d['final_correction'] for d in details if d['final_correction'] is not None]
+                    if corrections:
+                        max_correction = max(corrections)
+                        min_correction = min(corrections)
+                        avg_correction = sum(corrections) / len(corrections)
+                        max_abs_correction = max(abs(max_correction), abs(min_correction))
+                    else:
+                        max_correction = min_correction = avg_correction = max_abs_correction = 0.0
                     
-                    for sat_freq, data in system_level_medium.items():
-                        details = data['details'] if isinstance(data, dict) and 'details' in data else data
-                        arcs = data['arcs'] if isinstance(data, dict) and 'arcs' in data else []
-                        # 计算校正统计信息
-                        corrections = [d['final_correction'] for d in details if d['final_correction'] is not None]
-                        if corrections:
-                            max_correction = max(corrections)
-                            min_correction = min(corrections)
-                            avg_correction = sum(corrections) / len(corrections)
-                            max_abs_correction = max(abs(max_correction), abs(min_correction))
-                        else:
-                            max_correction = min_correction = avg_correction = max_abs_correction = 0.0
-                        
-                        report_lines.append(f"  {sat_freq}:")
-                        report_lines.append(f"    校正次数: {len(details)}")
-                        report_lines.append(f"    最大校正: {max_correction:.6f}m")
-                        report_lines.append(f"    最小校正: {min_correction:.6f}m")
-                        report_lines.append(f"    平均校正: {avg_correction:.6f}m")
-                        report_lines.append(f"    最大绝对校正: {max_abs_correction:.6f}m")
-                        report_lines.append(f"    ROC CV: {details[0]['roc_cv']:.3f}")
-                        
-                        # 显示前5个校正详情
-                        report_lines.append("    校正详情 (前5个):")
-                        for i, detail in enumerate(details[:5]):
-                            report_lines.append(f"      {i+1}. 时间: {detail['time']}, 时间差: {detail['time_diff_seconds']:.1f}s, 校正: {detail['final_correction']:.6f}m")
-                        report_lines.append("")
+                    report_lines.append(f"  {sat_freq}:")
+                    report_lines.append(f"    校正次数: {len(details)}")
+                    report_lines.append(f"    最大校正: {max_correction:.6f}m")
+                    report_lines.append(f"    最小校正: {min_correction:.6f}m")
+                    report_lines.append(f"    平均校正: {avg_correction:.6f}m")
+                    report_lines.append(f"    最大绝对校正: {max_abs_correction:.6f}m")
+                    report_lines.append(f"    ROC CV: {details[0]['roc_cv']:.3f}")
+                    
+                    # 显示前5个校正详情
+                    report_lines.append("    校正详情 (前5个):")
+                    for i, detail in enumerate(details[:5]):
+                        report_lines.append(f"      {i+1}. 时间: {detail['time']}, 时间差: {detail['time_diff_seconds']:.1f}s, 校正: {detail['final_correction']:.6f}m")
+                    if len(details) > 5:
+                        report_lines.append(f"      ... 还有 {len(details) - 5} 个校正记录")
+                    
+                    # 显示后5个校正详情
+                    if len(details) > 5:
+                        report_lines.append("    校正详情 (后5个):")
+                        for i, detail in enumerate(details[-5:], len(details) - 4):
+                            report_lines.append(f"      {i}. 时间: {detail['time']}, 时间差: {detail['time_diff_seconds']:.1f}s, 校正: {detail['final_correction']:.6f}m")
+                    report_lines.append("")
             else:
                 report_lines.append("3.1 系统级校正信息: 无")
                 report_lines.append("")
@@ -2094,7 +2304,7 @@ class GNSSAnalyzer:
                 # 合并所有个体级校正信息
                 all_individual = {**individual_level_high, **individual_level_medium}
                 report_lines.append(f"个体级校正 ({len(all_individual)}个卫星-频率组合):")
-                report_lines.append("-" * 25)
+                report_lines.append("-" * 35)
                 
                 for sat_freq, data in all_individual.items():
                     details = data['details'] if isinstance(data, dict) and 'details' in data else data
@@ -2115,16 +2325,89 @@ class GNSSAnalyzer:
                     report_lines.append(f"    最小校正: {min_correction:.6f}m")
                     report_lines.append(f"    平均校正: {avg_correction:.6f}m")
                     report_lines.append(f"    最大绝对校正: {max_abs_correction:.6f}m")
-                    report_lines.append(f"    校正策略: 高质量策略")
+                    report_lines.append(f"    ROC CV: {details[0]['roc_cv']:.3f}")
                     
                     # 显示前5个校正详情
                     report_lines.append("    校正详情 (前5个):")
                     for i, detail in enumerate(details[:5]):
                         report_lines.append(f"      {i+1}. 时间: {detail['time']}, 时间差: {detail['time_diff_seconds']:.1f}s, 校正: {detail['final_correction']:.6f}m")
+                    if len(details) > 5:
+                        report_lines.append(f"      ... 还有 {len(details) - 5} 个校正记录")
+                    
+                    # 显示后5个校正详情
+                    if len(details) > 5:
+                        report_lines.append("    校正详情 (后5个):")
+                        for i, detail in enumerate(details[-5:], len(details) - 4):
+                            report_lines.append(f"      {i}. 时间: {detail['time']}, 时间差: {detail['time_diff_seconds']:.1f}s, 校正: {detail['final_correction']:.6f}m")
                     report_lines.append("")
             else:
                 report_lines.append("3.2 个体级校正信息: 无")
                 report_lines.append("")
+            
+            # 3.3 手机独有卫星校正信息
+            if 'corrected_phase' in self.results:
+                corrected_data = self.results['corrected_phase']
+                phone_only_corrections = {}
+                
+                # 筛选手机独有卫星的校正信息
+                for sat_id, freq_data in corrected_data.items():
+                    for freq, correction_info in freq_data.items():
+                        if correction_info.get('data_source') == 'phone_only':
+                            sat_freq_key = f"{sat_id}_{freq}"
+                            phone_only_corrections[sat_freq_key] = correction_info
+                
+                if phone_only_corrections:
+                    report_lines.append("3.3 手机独有卫星校正信息")
+                    report_lines.append("-" * 30)
+                    
+                    for sat_freq, correction_info in phone_only_corrections.items():
+                        corrections = correction_info.get('correction_applied', [])
+                        times = correction_info.get('times', [])
+                        
+                        if corrections:
+                            max_correction = max(corrections)
+                            min_correction = min(corrections)
+                            avg_correction = sum(corrections) / len(corrections)
+                            max_abs_correction = max(abs(max_correction), abs(min_correction))
+                        else:
+                            max_correction = min_correction = avg_correction = max_abs_correction = 0.0
+                        
+                        roc_rate = correction_info.get('roc_rate', 0.0)
+                        roc_cv = correction_info.get('roc_cv', 0.0)
+                        
+                        report_lines.append(f"  {sat_freq}:")
+                        report_lines.append(f"    校正次数: {len(corrections)}")
+                        report_lines.append(f"    最大校正: {max_correction:.6f}m")
+                        report_lines.append(f"    最小校正: {min_correction:.6f}m")
+                        report_lines.append(f"    平均校正: {avg_correction:.6f}m")
+                        report_lines.append(f"    最大绝对校正: {max_abs_correction:.6f}m")
+                        report_lines.append(f"    ROC: {roc_rate:.6e} m/s")
+                        if roc_cv > 0:
+                            report_lines.append(f"    ROC CV: {roc_cv:.3f}")
+                        
+                        # 显示前5个校正详情
+                        if len(corrections) > 0 and len(times) > 0:
+                            report_lines.append("    校正详情 (前5个):")
+                            for i in range(min(5, len(corrections))):
+                                time_diff = 0.0
+                                if i > 0 and len(times) > i:
+                                    time_diff = (times[i] - times[0]).total_seconds()
+                                report_lines.append(f"      {i+1}. 时间: {times[i]}, 时间差: {time_diff:.1f}s, 校正: {corrections[i]:.6f}m")
+                            
+                            if len(corrections) > 5:
+                                report_lines.append(f"      ... 还有 {len(corrections) - 5} 个校正记录")
+                                
+                                # 显示后5个校正详情
+                                report_lines.append("    校正详情 (后5个):")
+                                for i in range(max(0, len(corrections) - 5), len(corrections)):
+                                    time_diff = 0.0
+                                    if i > 0 and len(times) > i:
+                                        time_diff = (times[i] - times[0]).total_seconds()
+                                    report_lines.append(f"      {i+1}. 时间: {times[i]}, 时间差: {time_diff:.1f}s, 校正: {corrections[i]:.6f}m")
+                        report_lines.append("")
+                else:
+                    report_lines.append("3.3 手机独有卫星校正信息: 无")
+                    report_lines.append("")
             
                 report_lines.append("")
         
@@ -5011,14 +5294,33 @@ def show_cleaning_window(parent):
     threshold_entry = ttk.Entry(threshold_frame, textvariable=threshold_var, width=10)
     threshold_entry.pack(side=tk.LEFT, padx=(10, 0))
 
-    # R方阈值设置
-    r_squared_frame = ttk.Frame(param_frame)
-    r_squared_frame.pack(fill=tk.X, pady=5)
+    # R方阈值和CV值阈值设置（同一行）
+    threshold_row_frame = ttk.Frame(param_frame)
+    threshold_row_frame.pack(fill=tk.X, pady=5)
 
-    ttk.Label(r_squared_frame, text="R方阈值:").pack(side=tk.LEFT)
+    # R方阈值
+    ttk.Label(threshold_row_frame, text="R方阈值:").pack(side=tk.LEFT)
     r_squared_var = tk.DoubleVar(value=0.5)
-    r_squared_entry = ttk.Entry(r_squared_frame, textvariable=r_squared_var, width=10)
+    r_squared_entry = ttk.Entry(threshold_row_frame, textvariable=r_squared_var, width=10)
     r_squared_entry.pack(side=tk.LEFT, padx=(10, 0))
+
+    # CV值阈值
+    ttk.Label(threshold_row_frame, text="CV阈值:").pack(side=tk.LEFT, padx=(20, 0))
+    cv_threshold_var = tk.DoubleVar(value=0.5)
+    cv_threshold_entry = ttk.Entry(threshold_row_frame, textvariable=cv_threshold_var, width=10)
+    cv_threshold_entry.pack(side=tk.LEFT, padx=(10, 0))
+    ttk.Label(threshold_row_frame, text="(默认: 0.5)").pack(side=tk.LEFT, padx=(5, 0))
+
+    # 手机独有卫星分析设置
+    phone_only_frame = ttk.Frame(param_frame)
+    phone_only_frame.pack(fill=tk.X, pady=5)
+
+    phone_only_var = tk.BooleanVar(value=False)
+    phone_only_checkbox = ttk.Checkbutton(phone_only_frame, text="启用手机独有卫星分析", 
+                                         variable=phone_only_var)
+    phone_only_checkbox.pack(side=tk.LEFT)
+
+    ttk.Label(phone_only_frame, text="(检测手机独有卫星的码相不一致性)").pack(side=tk.LEFT, padx=(10, 0))
 
     # 进度显示
     progress_frame = ttk.LabelFrame(main_frame, text="处理进度", padding="10")
@@ -5058,12 +5360,18 @@ def show_cleaning_window(parent):
                 # 设置R方阈值
                 analyzer.r_squared_threshold = r_squared_var.get()
                 
+                # 设置CV值阈值
+                analyzer.cv_threshold = cv_threshold_var.get()
+                
                 # 设置历元间双差最大阈值
                 analyzer.max_threshold_limits = {
                     'code': code_threshold_var.get(),
                     'phase': phase_threshold_var.get(),
                     'doppler': doppler_threshold_var.get()
                 }
+                
+                # 设置手机独有卫星分析
+                analyzer.enable_phone_only_analysis = phone_only_var.get()
 
                 # 更新状态
                 status_var.set("正在读取RINEX文件...")
@@ -5130,8 +5438,10 @@ def show_cleaning_window(parent):
                 cleaning_window.update_idletasks()
 
                 # 显示结果
-                result_dir = analyzer.current_result_dir
-                message = f"数据预处理完成！\n结果保存在：{result_dir}"
+                phone_file_name = os.path.basename(file_path)
+                phone_file_name_no_ext = os.path.splitext(phone_file_name)[0]
+                phone_result_dir = os.path.join("results", phone_file_name_no_ext)
+                message = f"数据预处理完成！\n结果保存在：{phone_result_dir}"
                 if receiver_file_var.get() and 'cci_results' in locals():
                     # 显示码相不一致性建模和校正的实际文件路径
                     corrected_file_path = cci_results.get('corrected_rinex_path', '')
