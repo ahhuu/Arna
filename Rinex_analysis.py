@@ -1037,7 +1037,6 @@ class GNSSAnalyzer:
         self.results['receiver_cmc'] = cmc_results
         return cmc_results
 
-
     def calculate_dcmc(self, receiver_rinex_path: str) -> Dict:
         """计算接收机CMC和手机CMC的站间单差(dCMC)
         
@@ -2441,23 +2440,13 @@ class GNSSAnalyzer:
         if not self.input_file_path:
             raise ValueError("未设置输入文件路径，无法生成校正后的RINEX文件")
             
-        # 确定输入文件路径（优先使用经过两次剔除后的cleaned2文件）
+        # 码相不一致处理直接使用原始文件
         input_file = self.input_file_path
-        # 使用手机RINEX文件的文件夹作为基础路径（而不是接收机文件的文件夹）
         phone_file_name = os.path.basename(self.input_file_path)
         phone_file_name_no_ext = os.path.splitext(phone_file_name)[0]
         phone_result_dir = os.path.join("results", phone_file_name_no_ext)
         
-        if os.path.exists(phone_result_dir):
-            cleaned2_file_name = f"cleaned2-{phone_file_name}"
-            cleaned2_file_path = os.path.join(phone_result_dir, cleaned2_file_name)
-            if os.path.exists(cleaned2_file_path):
-                input_file = cleaned2_file_path
-                print(f"使用经过两次剔除后的文件: {cleaned2_file_name}")
-            else:
-                print(f"cleaned2文件不存在，使用原始文件")
-        else:
-            print(f"手机文件结果目录不存在，使用原始文件")
+        print(f"使用原始文件进行码相不一致性建模和校正: {phone_file_name}")
             
         # 生成输出文件路径（保存到手机文件results文件夹下的code-carrier inconsistency子文件夹）
         if output_path is None:
@@ -2468,9 +2457,10 @@ class GNSSAnalyzer:
                 if not os.path.exists(cci_dir):
                     os.makedirs(cci_dir)
                 
-                input_basename = os.path.basename(input_file)
-                input_name, input_ext = os.path.splitext(input_basename)
-                output_path = os.path.join(cci_dir, f"{input_name}_corrected{input_ext}")
+                # 使用原始文件名，添加-cc inconsistency后缀
+                original_basename = os.path.basename(self.input_file_path)
+                original_name, original_ext = os.path.splitext(original_basename)
+                output_path = os.path.join(cci_dir, f"{original_name}-cc inconsistency{original_ext}")
             else:
                 input_dir = os.path.dirname(input_file)
                 input_basename = os.path.basename(input_file)
@@ -3214,8 +3204,24 @@ class GNSSAnalyzer:
             processed_sats += 1
             self.update_progress(int(processed_sats / total_sats * 50))
 
-        # 2. 读取RINEX文件内容
-        with open(self.input_file_path, 'r', encoding='utf-8') as f:
+        # 2. 读取RINEX文件内容（优先使用CCI处理后的文件）
+        input_file_path = self.input_file_path
+        phone_file_name = os.path.basename(self.input_file_path)
+        phone_file_name_no_ext = os.path.splitext(phone_file_name)[0]
+        phone_result_dir = os.path.join("results", phone_file_name_no_ext)
+        
+        # 检查是否存在CCI处理后的文件
+        cci_dir = os.path.join(phone_result_dir, "code-carrier inconsistency")
+        cci_file_name = f"{phone_file_name_no_ext}-cc inconsistency.25o"
+        cci_file_path = os.path.join(cci_dir, cci_file_name)
+        
+        if os.path.exists(cci_file_path):
+            input_file_path = cci_file_path
+            log_content.append(f"使用CCI处理后的文件: {cci_file_name}\n")
+        else:
+            log_content.append(f"使用原始文件: {phone_file_name}\n")
+        
+        with open(input_file_path, 'r', encoding='utf-8') as f:
             lines = f.readlines()
 
         # 3. 解析观测类型映射
@@ -3339,10 +3345,20 @@ class GNSSAnalyzer:
                 satellite_modifications.append("")
 
         # 5. 保存修改后的文件
-        results_dir = self.current_result_dir
-        file_name = os.path.basename(self.input_file_path)
-        cleaned_file_name = f"cleaned1-{file_name}"
-        output_path = os.path.join(results_dir, cleaned_file_name)
+        # 生成输出文件路径
+        phone_file_name = os.path.basename(self.input_file_path)
+        phone_file_name_no_ext = os.path.splitext(phone_file_name)[0]
+        phone_result_dir = os.path.join("results", phone_file_name_no_ext)
+        
+        # 创建Coarse error子文件夹
+        coarse_error_dir = os.path.join(phone_result_dir, "Coarse error")
+        if not os.path.exists(coarse_error_dir):
+            os.makedirs(coarse_error_dir)
+        
+        # 使用CCI处理后的文件名作为基础
+        cci_file_name = f"{phone_file_name_no_ext}-cc inconsistency.25o"
+        cleaned_file_name = f"cleaned1-{cci_file_name}"
+        output_path = os.path.join(coarse_error_dir, cleaned_file_name)
 
         with open(output_path, 'w', encoding='utf-8') as f:
             f.writelines(lines)
@@ -3390,7 +3406,7 @@ class GNSSAnalyzer:
 
         # 写入日志文件
         debug_file_name = "code_phase_cleaning.log"
-        debug_path = os.path.join(results_dir, debug_file_name)
+        debug_path = os.path.join(coarse_error_dir, debug_file_name)
         with open(debug_path, 'w', encoding='utf-8') as f:
             f.writelines(log_content)
 
@@ -4262,10 +4278,20 @@ class GNSSAnalyzer:
         
         # 确定输出文件路径
         if output_path is None:
-            input_dir = os.path.dirname(input_rinex_path)
+            # 使用手机文件的结果目录
+            phone_file_name = os.path.basename(self.input_file_path)
+            phone_file_name_no_ext = os.path.splitext(phone_file_name)[0]
+            phone_result_dir = os.path.join("results", phone_file_name_no_ext)
+            
+            # 创建BDS2/3 ISB子文件夹
+            isb_dir = os.path.join(phone_result_dir, "BDS2/3 ISB")
+            if not os.path.exists(isb_dir):
+                os.makedirs(isb_dir)
+            
+            # 使用cleaned2文件作为基础，添加-isb后缀
             input_name = os.path.basename(input_rinex_path)
             name, ext = os.path.splitext(input_name)
-            output_path = os.path.join(input_dir, f"{name}_ISB_corrected{ext}")
+            output_path = os.path.join(isb_dir, f"{name}-isb{ext}")
         
         self.update_progress(10)
         
@@ -4448,6 +4474,23 @@ class GNSSAnalyzer:
         log_file_path = self._create_isb_log_file()
         
         try:
+            # 检查并使用cleaned2文件作为输入
+            phone_file_name = os.path.basename(self.input_file_path)
+            phone_file_name_no_ext = os.path.splitext(phone_file_name)[0]
+            phone_result_dir = os.path.join("results", phone_file_name_no_ext)
+            coarse_error_dir = os.path.join(phone_result_dir, "Coarse error")
+            cci_file_name = f"{phone_file_name_no_ext}-cc inconsistency.25o"
+            cleaned2_file_name = f"cleaned2-{cci_file_name}"
+            cleaned2_file_path = os.path.join(coarse_error_dir, cleaned2_file_name)
+            
+            # 只有在目录存在时才检查文件
+            if os.path.exists(coarse_error_dir) and os.path.exists(cleaned2_file_path):
+                print(f"使用cleaned2文件进行ISB分析: {cleaned2_file_name}")
+                # 重新读取cleaned2文件的数据
+                self.read_rinex_obs(cleaned2_file_path)
+            else:
+                print("cleaned2文件不存在，使用原始文件进行ISB分析")
+            
             # 第一阶段：数据准备与预处理
             print("\n第一阶段：数据准备与预处理")
             print("-" * 40)
@@ -4861,17 +4904,21 @@ class GNSSAnalyzer:
 
         # 2. 读取RINEX文件内容（优先读取基于伪距相位差值剔除后的文件）
         input_file = self.input_file_path
+        phone_file_name = os.path.basename(self.input_file_path)
+        phone_file_name_no_ext = os.path.splitext(phone_file_name)[0]
+        phone_result_dir = os.path.join("results", phone_file_name_no_ext)
+        
         # 检查是否存在基于伪距相位差值剔除后的文件
-        results_dir = self.current_result_dir
-        file_name = os.path.basename(self.input_file_path)
-        cleaned_file_name = f"cleaned1-{file_name}"
-        cleaned_file_path = os.path.join(results_dir, cleaned_file_name)
+        coarse_error_dir = os.path.join(phone_result_dir, "Coarse error")
+        cci_file_name = f"{phone_file_name_no_ext}-cc inconsistency.25o"
+        cleaned_file_name = f"cleaned1-{cci_file_name}"
+        cleaned_file_path = os.path.join(coarse_error_dir, cleaned_file_name)
 
         if os.path.exists(cleaned_file_path):
             input_file = cleaned_file_path
             log_content.append(f"使用基于伪距相位差值剔除后的文件: {cleaned_file_name}\n")
         else:
-            log_content.append(f"使用原始文件: {file_name}\n")
+            log_content.append(f"使用原始文件: {phone_file_name}\n")
 
         with open(input_file, 'r', encoding='utf-8') as f:
             lines = f.readlines()
@@ -5030,10 +5077,8 @@ class GNSSAnalyzer:
                 satellite_modify_details.append("")
 
         # 7. 保存修改后的文件
-        results_dir = self.current_result_dir
-        file_name = os.path.basename(self.input_file_path)
-        modified_file_name = f"cleaned2-{file_name}"
-        output_path = os.path.join(results_dir, modified_file_name)
+        modified_file_name = f"cleaned2-{cci_file_name}"
+        output_path = os.path.join(coarse_error_dir, modified_file_name)
 
         with open(output_path, 'w', encoding='utf-8') as f:
             f.writelines(lines)
@@ -5083,7 +5128,7 @@ class GNSSAnalyzer:
 
         # 写入日志文件
         debug_file_name = "double_diffs_cleaning.log"
-        debug_path = os.path.join(results_dir, debug_file_name)
+        debug_path = os.path.join(coarse_error_dir, debug_file_name)
         with open(debug_path, 'w', encoding='utf-8') as f:
             f.writelines(log_content)
 
@@ -5802,8 +5847,16 @@ class GNSSAnalyzer:
                                 self.results['code_phase_diffs'],
                                 sat_id, freq, save=True
                             )
+                            # 每个图表后立即清理内存
+                            plt.close('all')
+                            gc.collect()
                         processed_sats += 1
                         self.update_progress(32 + int(processed_sats / total_sats * 16))
+                        
+                        # 每处理10个卫星后强制清理内存
+                        if processed_sats % 10 == 0:
+                            plt.close('all')
+                            gc.collect()
                     else:
                         print(f"--跳过保存: {sat_id} 伪距相位原始差值数据不足")
 
@@ -5830,8 +5883,16 @@ class GNSSAnalyzer:
                                 self.results['code_phase_diffs'],
                                 sat_id, freq, save=True
                             )
+                            # 每个图表后立即清理内存
+                            plt.close('all')
+                            gc.collect()
                         processed_sats += 1
                         self.update_progress(47 + int(processed_sats / total_sats * 16))
+                        
+                        # 每处理10个卫星后强制清理内存
+                        if processed_sats % 10 == 0:
+                            plt.close('all')
+                            gc.collect()
                     else:
                         print(f"--跳过保存: {sat_id} 伪距相位差值数据不足")
 
@@ -5890,8 +5951,11 @@ class GNSSAnalyzer:
                 gc.collect()
                 print("--双差图表保存完成，内存已清理")
 
-            # 保存北斗系统间偏差分析图表
-            if 'beidou_system_bias' in self.results and self.results['beidou_system_bias']:
+            # 保存北斗系统间偏差分析图表（仅当有接收机数据时）
+            if ('beidou_system_bias' in self.results and 
+                self.results['beidou_system_bias'] and 
+                hasattr(self, 'receiver_observations') and 
+                self.receiver_observations):
                 print("--开始保存北斗系统间偏差分析图表...")
                 self.plot_beidou_system_bias_analysis(
                     self.results['beidou_system_bias'], save=True
@@ -5902,6 +5966,8 @@ class GNSSAnalyzer:
                 plt.close('all')
                 gc.collect()
                 print("--北斗系统间偏差分析图表保存完成，内存已清理")
+            else:
+                print("--跳过北斗系统间偏差分析图表（无接收机数据）")
 
             # 完成进度
             self.update_progress(100)
@@ -6203,7 +6269,7 @@ def main():
     desc_frame = ttk.LabelFrame(main_frame, text="功能说明", padding="20")
     desc_frame.pack(fill=tk.X, pady=20)
 
-    ttk.Label(desc_frame, text="• 预处理：基于历元间双差和CMC变化阈值剔除粗差；码相不一致性建模和校正；BDS-2/3 ISB分析",
+    ttk.Label(desc_frame, text="• 预处理：码相不一致性建模和校正→CMC变化阈值剔除→历元间双差剔除→BDS-2/3 ISB分析校正",
               font=("Microsoft YaHei", 10)).pack(anchor=tk.W, pady=2)
     ttk.Label(desc_frame, text="• 可视化：生成各类分析图表，支持单独保存和批量保存",
               font=("Microsoft YaHei", 10)).pack(anchor=tk.W, pady=2)
@@ -6344,7 +6410,7 @@ def show_cleaning_window(parent):
     
     # 相位阈值
     ttk.Label(double_diff_frame, text="相位(米):").pack(side=tk.LEFT, padx=(10, 0))
-    phase_threshold_var = tk.DoubleVar(value=3.0)
+    phase_threshold_var = tk.DoubleVar(value=1.5)
     phase_threshold_entry = ttk.Entry(double_diff_frame, textvariable=phase_threshold_var, width=8)
     phase_threshold_entry.pack(side=tk.LEFT, padx=(5, 0))
     
@@ -6359,7 +6425,7 @@ def show_cleaning_window(parent):
     threshold_frame.pack(fill=tk.X, pady=2)
 
     ttk.Label(threshold_frame, text="CMC变化阈值(米):").pack(side=tk.LEFT)
-    threshold_var = tk.DoubleVar(value=5.0)
+    threshold_var = tk.DoubleVar(value=4.0)
     threshold_entry = ttk.Entry(threshold_frame, textvariable=threshold_var, width=10)
     threshold_entry.pack(side=tk.LEFT, padx=(10, 0))
 
@@ -6380,10 +6446,10 @@ def show_cleaning_window(parent):
 
     # CV值阈值
     ttk.Label(threshold_row_frame, text="CV阈值:").pack(side=tk.LEFT, padx=(20, 0))
-    cv_threshold_var = tk.DoubleVar(value=0.5)
+    cv_threshold_var = tk.DoubleVar(value=0.6)
     cv_threshold_entry = ttk.Entry(threshold_row_frame, textvariable=cv_threshold_var, width=10)
     cv_threshold_entry.pack(side=tk.LEFT, padx=(10, 0))
-    ttk.Label(threshold_row_frame, text="(默认: 0.5, ROC模型选择)").pack(side=tk.LEFT, padx=(5, 0))
+    ttk.Label(threshold_row_frame, text="(默认: 0.6, ROC模型选择)").pack(side=tk.LEFT, padx=(5, 0))
 
     # 手机独有卫星分析设置
     phone_only_frame = ttk.Frame(cci_frame)
@@ -6472,39 +6538,11 @@ def show_cleaning_window(parent):
                 # 读取文件
                 data = analyzer.read_rinex_obs(file_path)
 
-                # 计算伪距相位差值
-                status_var.set("正在计算伪距相位差值...")
-                progress_var.set(30)
-                cleaning_window.update_idletasks()
-
-                code_phase_diffs = analyzer.calculate_code_phase_differences(data)
-
-                # 第一阶段剔除
-                status_var.set("正在执行第一阶段剔除...")
-                progress_var.set(50)
-                cleaning_window.update_idletasks()
-
-                cleaned_file_path = analyzer.remove_code_phase_outliers(data, threshold_var.get())
-
-                # 计算历元间双差
-                status_var.set("正在计算历元间双差...")
-                progress_var.set(70)
-                cleaning_window.update_idletasks()
-
-                double_diffs = analyzer.calculate_epoch_double_differences()
-                triple_errors = analyzer.calculate_triple_median_error(double_diffs)
-
-                # 第二阶段剔除
-                status_var.set("正在执行第二阶段剔除...")
-                progress_var.set(70)
-                cleaning_window.update_idletasks()
-
-                analyzer.remove_outliers_and_save(double_diffs, triple_errors)
-
-                # 码相不一致性建模和校正（如果提供了接收机文件）
+                # 步骤1: 码相不一致性建模和校正（如果提供了接收机文件）
+                cci_results = None
                 if receiver_file_var.get():
                     status_var.set("正在进行码相不一致性建模和校正...")
-                    progress_var.set(85)
+                    progress_var.set(20)
                     cleaning_window.update_idletasks()
                     
                     try:
@@ -6512,18 +6550,48 @@ def show_cleaning_window(parent):
                         cci_results = analyzer.perform_code_phase_inconsistency_modeling(
                             receiver_rinex_path=receiver_file_var.get()
                         )
+                        print("码相不一致性建模和校正完成")
                     except Exception as e:
                         print(f"码相不一致性建模和校正失败: {e}")
                         # 继续执行其他步骤，不中断整个流程
 
-                # 北斗系统间偏差分析
+                # 步骤2: 计算伪距相位差值
+                status_var.set("正在计算伪距相位差值...")
+                progress_var.set(40)
+                cleaning_window.update_idletasks()
+
+                code_phase_diffs = analyzer.calculate_code_phase_differences(data)
+
+                # 步骤3: 第一阶段剔除（基于CMC变化阈值）
+                status_var.set("正在执行第一阶段剔除...")
+                progress_var.set(60)
+                cleaning_window.update_idletasks()
+
+                cleaned_file_path = analyzer.remove_code_phase_outliers(data, threshold_var.get())
+
+                # 步骤4: 计算历元间双差
+                status_var.set("正在计算历元间双差...")
+                progress_var.set(75)
+                cleaning_window.update_idletasks()
+
+                double_diffs = analyzer.calculate_epoch_double_differences()
+                triple_errors = analyzer.calculate_triple_median_error(double_diffs)
+
+                # 步骤5: 第二阶段剔除（基于双差）
+                status_var.set("正在执行第二阶段剔除...")
+                progress_var.set(80)
+                cleaning_window.update_idletasks()
+
+                analyzer.remove_outliers_and_save(double_diffs, triple_errors)
+
+                # 步骤6: 北斗系统间偏差分析
                 status_var.set("正在分析北斗系统间偏差...")
                 progress_var.set(85)
                 cleaning_window.update_idletasks()
 
                 beidou_bias_results = analyzer.analyze_beidou_system_bias()
                 
-                # ISB分析（如果有接收机文件）
+                # 步骤7: ISB分析（如果有接收机文件）
                 isb_results = None
                 if receiver_file_var.get():
                     try:
@@ -6548,7 +6616,17 @@ def show_cleaning_window(parent):
                 phone_result_dir = os.path.join("results", phone_file_name_no_ext)
                 message = f"数据预处理完成！\n结果保存在：{phone_result_dir}"
                 
-                if receiver_file_var.get() and 'cci_results' in locals():
+                # 显示处理步骤完成情况
+                message += "\n\n处理步骤完成情况："
+                message += "\n1. ✓ 码相不一致性建模和校正（如有接收机文件）"
+                message += "\n2. ✓ 伪距相位差值计算"
+                message += "\n3. ✓ 第一阶段剔除（CMC变化阈值）"
+                message += "\n4. ✓ 历元间双差计算"
+                message += "\n5. ✓ 第二阶段剔除（双差阈值）"
+                message += "\n6. ✓ 北斗系统间偏差分析"
+                message += "\n7. ✓ ISB分析（如有接收机文件）"
+                
+                if receiver_file_var.get() and cci_results:
                     # 显示码相不一致性建模和校正的实际文件路径
                     corrected_file_path = cci_results.get('corrected_rinex_path', '')
                     if corrected_file_path:
@@ -7162,9 +7240,12 @@ def show_charts_window(parent):
                     analyzer.read_receiver_rinex_obs(base_path)
                     analyzer.calculate_receiver_cmc()
 
-                # 分析北斗系统间偏差
-                beidou_bias_results = analyzer.analyze_beidou_system_bias()
-                analyzer.results['beidou_system_bias'] = beidou_bias_results
+                # 分析北斗系统间偏差（仅当有接收机数据时）
+                if hasattr(analyzer, 'receiver_observations') and analyzer.receiver_observations:
+                    beidou_bias_results = analyzer.analyze_beidou_system_bias()
+                    analyzer.results['beidou_system_bias'] = beidou_bias_results
+                else:
+                    print("--跳过北斗系统间偏差分析（无接收机数据）")
 
                 # 更新状态
                 charts_window.after(0, lambda: status_var.set("正在生成所有图表..."))
