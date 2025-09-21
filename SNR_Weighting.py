@@ -84,77 +84,123 @@ def generate_model_info(system, freq, data_count,
 
 # 可视化函数
 def visualize_elevation_model(ax, subset, a_elev, b_elev, system, freq, data_count):
-    ax.scatter(subset['ele'], subset['residual'].values, alpha=0.5, s=10, label='观测值')
+    ax.scatter(subset['ele'], subset['residual'].values ** 2, alpha=0.5, s=10, label='观测值')
     elev_range = np.linspace(min(subset['ele']), max(subset['ele']), 100)
     elev_range_rad = np.radians(elev_range)
-    # 计算标准差并绘制
+    # 绘制方差拟合曲线
     variance_pred = elevation_model(elev_range_rad, a_elev, b_elev)
-    std_pred = np.sqrt(np.maximum(variance_pred, 0))  # 确保非负
-    ax.plot(elev_range, std_pred, 'r-', linewidth=2, label='拟合曲线')
+    ax.plot(elev_range, variance_pred, 'r-', linewidth=2, label='拟合曲线')
     ax.set_xlabel('高度角 (°)')
-    ax.set_ylabel('伪距残差 (m)')
+    ax.set_ylabel('伪距残差平方 (m²)')
     ax.set_title('高度角模型')
     ax.legend()
 
 
 def visualize_snr_model(ax, subset, a_snr, b_snr, system, freq, data_count):
-    ax.scatter(subset['snr'], subset['residual'].values, alpha=0.5, s=10, label='观测值')
+    ax.scatter(subset['snr'], subset['residual'].values ** 2, alpha=0.5, s=10, label='观测值')
     snr_range = np.linspace(min(subset['snr']), max(subset['snr']), 100)
-    # 计算标准差并绘制
+    # 绘制方差拟合曲线
     variance_pred = snr_model(snr_range, a_snr, b_snr)
-    std_pred = np.sqrt(np.maximum(variance_pred, 0))  # 确保非负
-    ax.plot(snr_range, std_pred, 'g-', linewidth=2, label='拟合曲线')
+    ax.plot(snr_range, variance_pred, 'g-', linewidth=2, label='拟合曲线')
     ax.set_xlabel('信噪比 (dB-Hz)')
-    ax.set_ylabel('伪距残差 (m)')
+    ax.set_ylabel('伪距残差平方 (m²)')
     ax.set_title('指数信噪比模型')
     ax.legend()
 
 
 def visualize_linear_snr_model(ax, subset, a_linear_snr, b_linear_snr, system, freq, data_count):
-    ax.scatter(subset['snr'], subset['residual'].values, alpha=0.5, s=10, label='观测值')
+    ax.scatter(subset['snr'], subset['residual'].values ** 2, alpha=0.5, s=10, label='观测值')
     snr_range = np.linspace(min(subset['snr']), max(subset['snr']), 100)
-    # 计算标准差并绘制
+    # 绘制方差拟合曲线
     variance_pred = linear_snr_model(snr_range, a_linear_snr, b_linear_snr)
-    std_pred = np.sqrt(np.maximum(variance_pred, 0))  # 确保非负
-    ax.plot(snr_range, std_pred, 'm-', linewidth=2, label='拟合曲线')
+    ax.plot(snr_range, variance_pred, 'm-', linewidth=2, label='拟合曲线')
     ax.set_xlabel('信噪比 (dB-Hz)')
-    ax.set_ylabel('伪距残差 (m)')
+    ax.set_ylabel('伪距残差平方 (m²)')
     ax.set_title('线性信噪比模型')
     ax.legend()
 
 
 def visualize_combined_model(ax, subset, a_comb, b_comb, c_comb, system, freq, data_count):
+    # 按历元排序数据
+    subset_sorted = subset.sort_values('epoch')
+    
+    # 创建历元（从1开始）
+    subset_sorted = subset_sorted.copy()
+    subset_sorted['epoch_num'] = range(1, len(subset_sorted) + 1)
+    
     # 创建双y轴
     ax2 = ax.twinx()
     
-    # 绘制伪距残差 vs 高度角
-    ax.scatter(subset['ele'], subset['residual'].values, alpha=0.6, s=8, 
-               color='red', label='伪距残差')
-    ax.set_xlabel('高度角 (°)')
-    ax.set_ylabel('伪距残差 (m)', color='red')
+    # 绘制伪距残差平方随历元变化 - 显示所有数据点，使用更小的点
+    ax.scatter(subset_sorted['epoch_num'], subset_sorted['residual'] ** 2, 
+              alpha=0.4, s=6, color='red', label='伪距残差平方')
+    ax.set_xlabel('历元')
+    ax.set_ylabel('伪距残差平方（m²）', color='red')
     ax.tick_params(axis='y', labelcolor='red')
     
-    # 绘制信噪比 vs 高度角（使用右y轴）
-    ax2.scatter(subset['ele'], subset['snr'], alpha=0.6, s=8, 
-                color='green', label='信噪比')
-    ax2.set_ylabel('信噪比 (dB-Hz)', color='green')
-    ax2.tick_params(axis='y', labelcolor='green')
+    # 设置伪距残差平方的y轴范围
+    residual_squared = subset_sorted['residual'] ** 2
+    residual_min, residual_max = residual_squared.min(), residual_squared.max()
+    residual_range = residual_max - residual_min
+    if residual_range > 0:
+        # 添加30%的边距
+        margin = residual_range * 0.3
+        ax.set_ylim(residual_min - margin, residual_max + margin)
     
-    ax.set_title('联合模型 - 伪距残差与信噪比随高度角变化')
+    # 绘制高度角随历元变化 - 使用散点
+    ax2.scatter(subset_sorted['epoch_num'], subset_sorted['ele'], 
+               alpha=0.6, s=6, color='blue', label='高度角')
+    ax2.set_ylabel('高度角（°）', color='blue')
+    ax2.tick_params(axis='y', labelcolor='blue')
+    
+    # 设置高度角的y轴范围
+    ele_min, ele_max = subset_sorted['ele'].min(), subset_sorted['ele'].max()
+    ele_range = ele_max - ele_min
+    if ele_range > 0:
+        # 添加30%的边距
+        margin = ele_range * 0.3
+        ax2.set_ylim(max(0, ele_min - margin), min(90, ele_max + margin))
+    else:
+        ax2.set_ylim(0, 90)
+    
+    # 如果有信噪比数据，也绘制信噪比 - 使用散点
+    if 'snr' in subset_sorted.columns and not subset_sorted['snr'].isna().all():
+        ax3 = ax.twinx()
+        ax3.spines['right'].set_position(('outward', 60))
+        ax3.scatter(subset_sorted['epoch_num'], subset_sorted['snr'], 
+                   alpha=0.6, s=6, color='green', label='信噪比')
+        ax3.set_ylabel('信噪比（dB-Hz）', color='green')
+        ax3.tick_params(axis='y', labelcolor='green')
+        
+        # 设置信噪比的y轴范围
+        snr_min, snr_max = subset_sorted['snr'].min(), subset_sorted['snr'].max()
+        snr_range = snr_max - snr_min
+        if snr_range > 0:
+            # 添加30%的边距
+            margin = snr_range * 0.3
+            ax3.set_ylim(max(0, snr_min - margin), snr_max + margin)
+        else:
+            ax3.set_ylim(0, 50)
+    
+    ax.set_title('联合模型 - 伪距残差平方随历元变化')
+    ax.grid(True, alpha=0.3)
     
     # 优化x轴刻度显示
-    ele_min, ele_max = subset['ele'].min(), subset['ele'].max()
-    ele_range = ele_max - ele_min
-    if ele_range > 20:
-        step = max(1, int(ele_range // 10))  # 最多显示10个刻度
-        ax.set_xticks(np.arange(ele_min, ele_max + 1, step))
+    max_epoch = len(subset_sorted)
+    if max_epoch > 20:
+        step = max(1, max_epoch // 10)  # 最多显示10个刻度
+        ax.set_xticks(range(1, max_epoch + 1, step))
     else:
-        ax.set_xticks(np.linspace(ele_min, ele_max, 10))
+        ax.set_xticks(range(1, max_epoch + 1))
     
     # 合并图例
     lines1, labels1 = ax.get_legend_handles_labels()
     lines2, labels2 = ax2.get_legend_handles_labels()
-    ax.legend(lines1 + lines2, labels1 + labels2, loc='upper left')
+    if 'snr' in subset_sorted.columns and not subset_sorted['snr'].isna().all():
+        lines3, labels3 = ax3.get_legend_handles_labels()
+        ax.legend(lines1 + lines2 + lines3, labels1 + labels2 + labels3, loc='upper left')
+    else:
+        ax.legend(lines1 + lines2, labels1 + labels2, loc='upper left')
 
 
 def visualize_individual_combined_models(subset, system, freq, output_dir):
@@ -271,43 +317,6 @@ def visualize_individual_combined_models(subset, system, freq, output_dir):
     plt.close(fig)
 
 
-def visualize_residual_vs_factors(subset, system, freq, output_dir):
-    """绘制伪距残差随高度角和信噪比变化的图"""
-    # 创建3D散点图
-    fig = plt.figure(figsize=(15, 5))
-    
-    # 3D散点图
-    ax1 = fig.add_subplot(131, projection='3d')
-    scatter = ax1.scatter(subset['ele'], subset['snr'], subset['residual'], 
-                         c=subset['residual'], cmap='viridis', alpha=0.6, s=20)
-    ax1.set_xlabel('高度角 (°)')
-    ax1.set_ylabel('信噪比 (dB-Hz)')
-    ax1.set_zlabel('伪距残差 (m)')
-    ax1.set_title('3D: 伪距残差随高度角和信噪比变化')
-    plt.colorbar(scatter, ax=ax1, shrink=0.5)
-    
-    # 伪距残差 vs 高度角
-    ax2 = fig.add_subplot(132)
-    ax2.scatter(subset['ele'], subset['residual'], alpha=0.6, s=8, color='red')
-    ax2.set_xlabel('高度角 (°)')
-    ax2.set_ylabel('伪距残差 (m)')
-    ax2.set_title('伪距残差 vs 高度角')
-    ax2.grid(True, alpha=0.3)
-    
-    # 伪距残差 vs 信噪比
-    ax3 = fig.add_subplot(133)
-    ax3.scatter(subset['snr'], subset['residual'], alpha=0.6, s=8, color='red')
-    ax3.set_xlabel('信噪比 (dB-Hz)')
-    ax3.set_ylabel('伪距残差 (m)')
-    ax3.set_title('伪距残差 vs 信噪比')
-    ax3.grid(True, alpha=0.3)
-    
-    plt.tight_layout()
-    
-    # 保存图片
-    residual_factors_file = os.path.join(output_dir, f'residual_vs_factors_{system}_{freq}.png')
-    fig.savefig(residual_factors_file, dpi=300, bbox_inches='tight')
-    plt.close(fig)
 
 
 def visualize_epoch_residuals(subset, system, freq, output_dir):
@@ -374,6 +383,130 @@ def visualize_epoch_residuals(subset, system, freq, output_dir):
     plt.close(fig)
 
 
+def visualize_global_residuals(df, output_dir):
+    """绘制手机所有伪距残差的全局分析图"""
+    if len(df) == 0:
+        return
+    
+    # 创建2x2的子图布局
+    fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+    fig.suptitle('手机伪距残差全局分析', fontsize=16, fontweight='bold')
+    
+    # 1. 伪距残差随时间变化图
+    ax1 = axes[0, 0]
+    
+    # 按卫星-频率组合分组，为每个组合分配不同颜色
+    df_sorted = df.sort_values('epoch')
+    df_sorted = df_sorted.copy()
+    
+    # 创建卫星-频率组合标识
+    df_sorted['prn_freq'] = df_sorted['prn'] + ' ' + df_sorted['frequency']
+    prn_freq_combinations = df_sorted['prn_freq'].unique()
+    
+    # 为每个组合分配颜色
+    colors = plt.cm.tab20(np.linspace(0, 1, len(prn_freq_combinations)))
+    prn_freq_color_map = dict(zip(prn_freq_combinations, colors))
+    
+    # 创建时间轴（从第一个历元开始，以分钟:秒格式显示）
+    time_minutes = []
+    for epoch in df_sorted['epoch']:
+        if hasattr(epoch, 'minute') and hasattr(epoch, 'second'):
+            time_str = f"{epoch.minute:02d}:{epoch.second:02d}"
+        else:
+            # 如果是字符串或其他格式，尝试解析
+            try:
+                if isinstance(epoch, str):
+                    from datetime import datetime
+                    dt = datetime.strptime(epoch, '%Y-%m-%d %H:%M:%S')
+                    time_str = f"{dt.minute:02d}:{dt.second:02d}"
+                else:
+                    time_str = str(epoch)
+            except:
+                time_str = str(epoch)
+        time_minutes.append(time_str)
+    
+    df_sorted['time_display'] = time_minutes
+    
+    # 为每个卫星-频率组合绘制散点图
+    for prn_freq in prn_freq_combinations:
+        combo_data = df_sorted[df_sorted['prn_freq'] == prn_freq]
+        if len(combo_data) > 0:
+            ax1.scatter(combo_data['time_display'], combo_data['residual'], 
+                       alpha=0.6, s=8, color=prn_freq_color_map[prn_freq])
+    
+    ax1.set_xlabel('时间 (分:秒)')
+    ax1.set_ylabel('伪距残差 (m)')
+    ax1.set_title('伪距残差随时间变化')
+    ax1.grid(True, alpha=0.3)
+    
+    # 设置纵坐标范围正负平均
+    residual_max = np.max(np.abs(df_sorted['residual']))
+    ax1.set_ylim(-residual_max, residual_max)
+    
+    # 优化x轴刻度显示
+    unique_times = df_sorted['time_display'].unique()
+    if len(unique_times) > 10:
+        step = max(1, len(unique_times) // 10)
+        selected_times = unique_times[::step]
+        ax1.set_xticks(selected_times)
+        ax1.tick_params(axis='x', rotation=45)
+    
+    # 2. 伪距残差分布直方图
+    ax2 = axes[0, 1]
+    
+    residuals = df['residual'].values
+    ax2.hist(residuals, bins=50, alpha=0.7, color='skyblue', edgecolor='black', density=True)
+    ax2.set_xlabel('伪距残差 (m)')
+    ax2.set_ylabel('密度')
+    ax2.set_title('伪距残差分布')
+    ax2.grid(True, alpha=0.3)
+    
+    # 添加统计信息
+    mean_residual = np.mean(residuals)
+    std_residual = np.std(residuals)
+    ax2.axvline(mean_residual, color='red', linestyle='--', linewidth=2, label=f'均值: {mean_residual:.2f}m')
+    ax2.axvline(mean_residual + std_residual, color='orange', linestyle='--', linewidth=2, label=f'±1σ: {std_residual:.2f}m')
+    ax2.axvline(mean_residual - std_residual, color='orange', linestyle='--', linewidth=2)
+    ax2.legend()
+    
+    # 设置横坐标范围正负平均
+    residual_max = np.max(np.abs(residuals))
+    ax2.set_xlim(-residual_max, residual_max)
+    
+    # 3. 伪距残差与高度角关系
+    ax3 = axes[1, 0]
+    
+    ax3.scatter(df['ele'], df['residual'], alpha=0.6, s=8, color='red')
+    ax3.set_xlabel('高度角 (°)')
+    ax3.set_ylabel('伪距残差 (m)')
+    ax3.set_title('伪距残差与高度角关系')
+    ax3.grid(True, alpha=0.3)
+    
+    # 设置纵坐标范围正负平均
+    residual_max = np.max(np.abs(df['residual']))
+    ax3.set_ylim(-residual_max, residual_max)
+    
+    # 4. 伪距残差与信噪比关系
+    ax4 = axes[1, 1]
+    
+    ax4.scatter(df['snr'], df['residual'], alpha=0.6, s=8, color='red')
+    ax4.set_xlabel('信噪比 (dB-Hz)')
+    ax4.set_ylabel('伪距残差 (m)')
+    ax4.set_title('伪距残差与信噪比关系')
+    ax4.grid(True, alpha=0.3)
+    
+    # 设置纵坐标范围正负平均
+    residual_max = np.max(np.abs(df['residual']))
+    ax4.set_ylim(-residual_max, residual_max)
+    
+    plt.tight_layout()
+    
+    # 保存图片
+    global_file = os.path.join(output_dir, 'global_residuals_analysis.png')
+    fig.savefig(global_file, dpi=300, bbox_inches='tight')
+    plt.close(fig)
+
+
 def fit_and_visualize(subset, system, freq, output_dir):
     y = subset['residual'].values
     x_elev = subset['elevation_rad'].values
@@ -424,9 +557,6 @@ def fit_and_visualize(subset, system, freq, output_dir):
     
     # 绘制每个卫星每个频率的单独联合模型图
     visualize_individual_combined_models(subset, system, freq, output_dir)
-    
-    # 绘制伪距残差随高度角和信噪比变化的图
-    visualize_residual_vs_factors(subset, system, freq, output_dir)
 
     return result
 
@@ -456,6 +586,10 @@ def main():
     df['residual'] = pd.to_numeric(df['residual'], errors='coerce')
     df = df.dropna()
     df['elevation_rad'] = np.radians(df['ele'])
+
+    # 绘制全局伪距残差分析图
+    print("开始绘制全局伪距残差分析图...")
+    visualize_global_residuals(df, output_dir)
 
     # 按卫星系统和频率分组拟合
     systems = df['system'].unique()
