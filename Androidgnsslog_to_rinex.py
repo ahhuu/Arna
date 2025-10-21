@@ -23,7 +23,7 @@ from tkinter import filedialog
 from tkinter import ttk, messagebox
 import logging  # 新增：日志模块
 
-# -------------------- 新增：日志配置 --------------------
+# -------------------- 日志配置 --------------------
 logging.basicConfig(
     level=logging.DEBUG,
     format='%(asctime)s - %(levelname)s - %(message)s',
