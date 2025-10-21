@@ -18,12 +18,13 @@ plt.rcParams['axes.unicode_minus'] = False  # 解决负号显示问题
 # 尝试设置中文字体
 try:
     import matplotlib.font_manager as fm
+
     # 查找系统中可用的中文字体
     chinese_fonts = []
     for font in fm.fontManager.ttflist:
         if 'SimHei' in font.name or 'Microsoft YaHei' in font.name or 'SimSun' in font.name:
             chinese_fonts.append(font.name)
-    
+
     if chinese_fonts:
         plt.rcParams['font.sans-serif'] = chinese_fonts[:3] + ['DejaVu Sans']
         print(f"使用中文字体: {chinese_fonts[:3]}")
@@ -42,14 +43,14 @@ class GNSSAnalyzer:
         self.cv_threshold = 0.6  # CV值阈值，默认0.5
         # 历元间双差最大阈值限制
         self.max_threshold_limits = {
-            'code': 10.0,    # 伪距（米）
-            'phase': 1.5,    # 相位（米）
-            'doppler': 5.0   # 多普勒（米/秒）
+            'code': 10.0,  # 伪距（米）
+            'phase': 1.5,  # 相位（米）
+            'doppler': 5.0  # 多普勒（米/秒）
         }
         # 手机独有卫星分析配置
         self.enable_phone_only_analysis = False  # 是否启用手机独有卫星分析
-        self.phone_only_min_data_points = 20     # 手机独有卫星最小数据点数
-        
+        self.phone_only_min_data_points = 20  # 手机独有卫星最小数据点数
+
         # ISB分析配置（使用动态基准卫星选择，不再需要固定阈值）
         self.frequencies = {
             'G': {'L1C': 1575.42e6, 'L5Q': 1176.45e6},  # GPS
@@ -71,7 +72,9 @@ class GNSSAnalyzer:
             'BDS-3': {  # 北斗三号系统 (GEO/IGSO/MEO)
                 'GEO': ['C59', 'C60', 'C61'],  # 地球静止轨道
                 'IGSO': ['C38', 'C39', 'C40', 'C41', 'C42', 'C43', 'C44', 'C45', 'C46'],  # 倾斜地球同步轨道
-                'MEO': ['C19', 'C20', 'C21', 'C22', 'C23', 'C24', 'C25', 'C26', 'C27', 'C28', 'C29', 'C30', 'C31', 'C32', 'C33', 'C34', 'C35', 'C36', 'C37', 'C47', 'C48', 'C49', 'C50', 'C51', 'C52', 'C53', 'C54', 'C55', 'C56', 'C57', 'C58']  # 中地球轨道
+                'MEO': ['C19', 'C20', 'C21', 'C22', 'C23', 'C24', 'C25', 'C26', 'C27', 'C28', 'C29', 'C30', 'C31',
+                        'C32', 'C33', 'C34', 'C35', 'C36', 'C37', 'C47', 'C48', 'C49', 'C50', 'C51', 'C52', 'C53',
+                        'C54', 'C55', 'C56', 'C57', 'C58']  # 中地球轨道
             }
         }
 
@@ -236,30 +239,30 @@ class GNSSAnalyzer:
                         day = int(parts[2])
                         hour = int(parts[3])
                         minute = int(parts[4])
-                        
+
                         # 处理秒的小数部分，保留精度避免历元合并
                         try:
                             second_float = float(parts[5])
-                            
+
                             # 处理边界情况：如果秒值>=60，需要进位到分钟
                             if second_float >= 60:
                                 # 进位到分钟
                                 extra_minutes = int(second_float // 60)
                                 minute += extra_minutes
                                 second_float = second_float % 60
-                                
+
                                 # 如果分钟>=60，进位到小时
                                 if minute >= 60:
                                     extra_hours = minute // 60
                                     hour += extra_hours
                                     minute = minute % 60
-                                    
+
                                     # 如果小时>=24，进位到天
                                     if hour >= 24:
                                         extra_days = hour // 24
                                         day += extra_days
                                         hour = hour % 24
-                            
+
                             # 创建精确的时间戳，保留秒的小数部分
                             current_epoch = pd.Timestamp(
                                 year=year, month=month, day=day,
@@ -384,7 +387,7 @@ class GNSSAnalyzer:
                     # 存储时间和伪距
                     self.observations_meters[sat_id][freq]['times'].append(current_epoch)
                     self.observations_meters[sat_id][freq]['code'].append(code_val)
-                    
+
                     # 存储信噪比
                     self.observations_meters[sat_id][freq]['snr'].append(snr_val)
 
@@ -433,7 +436,7 @@ class GNSSAnalyzer:
         - G: L1C, L5Q
         - R: L1C
         - E: L1C, L5Q, L7Q
-        - C: L2I
+        - C: L2I, L1P, L5P
         """
         self.receiver_input_file_path = file_path
         filename = os.path.basename(file_path)
@@ -490,7 +493,8 @@ class GNSSAnalyzer:
                         else:
                             break
                     if system:
-                        data['header'][f'obs_types_{system}'] = obs_types_list[:num_types] if num_types > 0 else obs_types_list
+                        data['header'][f'obs_types_{system}'] = obs_types_list[
+                                                                :num_types] if num_types > 0 else obs_types_list
                     continue
                 j += 1
         except Exception:
@@ -501,7 +505,7 @@ class GNSSAnalyzer:
             'G': ['L1C', 'L5Q'],
             'R': ['L1C'],
             'E': ['L1C', 'L5Q', 'L7Q'],
-            'C': ['L2I']
+            'C': ['L2I', 'L1P', 'L5P']
         }
 
         # 历元/数据体
@@ -525,11 +529,14 @@ class GNSSAnalyzer:
                 try:
                     parts = line[1:].split()
                     if len(parts) >= 6:
-                        year = int(parts[0]); month = int(parts[1]); day = int(parts[2])
-                        hour = int(parts[3]); minute = int(parts[4])
+                        year = int(parts[0])
+                        month = int(parts[1])
+                        day = int(parts[2])
+                        hour = int(parts[3])
+                        minute = int(parts[4])
                         second_float = float(parts[5])
                         current_epoch = pd.Timestamp(
-                            year=year, month=month, day=day, 
+                            year=year, month=month, day=day,
                             hour=hour, minute=minute, second=int(second_float),
                             microsecond=int((second_float - int(second_float)) * 1000000)
                         )
@@ -602,13 +609,17 @@ class GNSSAnalyzer:
             idx_map = defaultdict(dict)
             for idx, obs in enumerate(obs_types):
                 if obs.startswith('C'):
-                    f = f"L{obs[1:]}"; idx_map[f]['code'] = idx
+                    f = f"L{obs[1:]}"
+                    idx_map[f]['code'] = idx
                 elif obs.startswith('L'):
-                    f = f"L{obs[1:]}"; idx_map[f]['phase'] = idx
+                    f = f"L{obs[1:]}"
+                    idx_map[f]['phase'] = idx
                 elif obs.startswith('D'):
-                    f = f"L{obs[1:]}"; idx_map[f]['doppler'] = idx
+                    f = f"L{obs[1:]}"
+                    idx_map[f]['doppler'] = idx
                 elif obs.startswith('S'):
-                    f = f"L{obs[1:]}"; idx_map[f]['snr'] = idx
+                    f = f"L{obs[1:]}"
+                    idx_map[f]['snr'] = idx
 
             for freq in allowed_freqs:
                 if freq not in idx_map:
@@ -618,12 +629,12 @@ class GNSSAnalyzer:
                     self.receiver_observations[sat_id][freq] = {
                         'times': [],
                         'code': [],
-                        'phase': [],            # 转米
-                        'phase_cycle': [],      # 原始周
-                        'doppler': [],          # 转 m/s
-                        'doppler_hz': [],       # 原始 Hz
+                        'phase': [],  # 转米
+                        'phase_cycle': [],  # 原始周
+                        'doppler': [],  # 转 m/s
+                        'doppler_hz': [],  # 原始 Hz
                         'wavelength': [],
-                        'snr': []              # 信噪比
+                        'snr': []  # 信噪比
                     }
 
                 # 取字段值
@@ -711,7 +722,7 @@ class GNSSAnalyzer:
                         d_mps = doppler_mps[idx] if idx < len(doppler_mps) else None
                         d_hz = doppler_hz[idx] if idx < len(doppler_hz) else None
                         f.write(
-                            f"    [{idx+1}] {t}: Code={c}, Phase(cyc)={p_cyc}, Phase(m)={p_m}, Doppler(Hz)={d_hz}, Doppler(m/s)={d_mps}\n"
+                            f"    [{idx + 1}] {t}: Code={c}, Phase(cyc)={p_cyc}, Phase(m)={p_m}, Doppler(Hz)={d_hz}, Doppler(m/s)={d_mps}\n"
                         )
         print(f"[调试] 接收机观测调试文件: {debug_path}")
 
@@ -1022,7 +1033,7 @@ class GNSSAnalyzer:
     def calculate_receiver_cmc(self) -> Dict:
         """基于 self.receiver_observations 计算接收机CMC(Code-Phase)，单位米。
 
-        仅计算频点：G(L1C,L5Q)、R(L1C)、E(L1C,L5Q,L7Q)、C(L2I)。
+        仅计算频点：G(L1C,L5Q)、R(L1C)、E(L1C,L5Q,L7Q)、C(L2I,L1P,L5P)。
         返回结构：{sat_id: {freq: {'times': [...], 'cmc_m': [...]}}}
         """
         self.start_stage(3, "计算接收机CMC", 100)
@@ -1031,7 +1042,7 @@ class GNSSAnalyzer:
             'G': ['L1C', 'L5Q'],
             'R': ['L1C'],
             'E': ['L1C', 'L5Q', 'L7Q'],
-            'C': ['L2I']
+            'C': ['L2I', 'L1P', 'L5P']
         }
 
         cmc_results: Dict = {}
@@ -1082,35 +1093,35 @@ class GNSSAnalyzer:
         返回结构：{sat_id: {freq: {'times': [...], 'dcmc': [...]}}}
         """
         self.start_stage(5, "计算站间单差CMC", 100)
-        
+
         # 确保已计算接收机CMC
         if not self.results.get('receiver_cmc'):
             self.read_receiver_rinex_obs(receiver_rinex_path)
             self.calculate_receiver_cmc()
-            
+
         # 确保已计算手机伪距相位原始差值（作为手机CMC）
         if not self.results.get('code_phase_differences'):
             # 需要传入data参数，这里使用observations_meters
             data = {'observations_meters': self.observations_meters}
             self.calculate_code_phase_differences(data)
-            
+
         receiver_cmc = self.results['receiver_cmc']
         phone_cmc = self.results['code_phase_differences']  # 使用伪距相位原始差值
-        
+
         dcmc_results = {}
         total_combinations = 0
         processed_combinations = 0
         filtered_combinations = 0  # 被过滤的组合数
         outlier_count = 0  # 异常值数量
-        
+
         # 存储线性漂移检测的详细信息
         linear_drift_detailed = {}
-        
+
         # 统计总的卫星-频率组合数
         for sat_id in receiver_cmc.keys():
             if sat_id in phone_cmc:
                 total_combinations += len(set(receiver_cmc[sat_id].keys()) & set(phone_cmc[sat_id].keys()))
-        
+
         # 如果启用手机独有卫星分析，统计手机独有卫星
         phone_only_combinations = 0
         if self.enable_phone_only_analysis:
@@ -1118,35 +1129,35 @@ class GNSSAnalyzer:
                 if sat_id not in receiver_cmc:
                     phone_only_combinations += len(phone_cmc[sat_id].keys())
             total_combinations += phone_only_combinations
-        
+
         for sat_id in receiver_cmc.keys():
             if sat_id not in phone_cmc:
                 continue
-                
+
             receiver_freqs = receiver_cmc[sat_id]
             phone_freqs = phone_cmc[sat_id]
-            
+
             # 找到共同的频率
             common_freqs = set(receiver_freqs.keys()) & set(phone_freqs.keys())
-            
+
             if not common_freqs:
                 continue
-                
+
             sat_dcmc = {}
-            
+
             for freq in common_freqs:
                 receiver_data = receiver_freqs[freq]
                 phone_data = phone_freqs[freq]
-                
+
                 # 找到共同的时间历元（使用容差匹配）
                 receiver_times = receiver_data['times']
                 phone_times = phone_data['times']
-                
+
                 # 使用容差匹配找到共同时间点
                 common_times = []
                 receiver_time_idx = {}
                 phone_time_idx = {}
-                
+
                 for i, rec_time in enumerate(receiver_times):
                     for j, phone_time in enumerate(phone_times):
                         # 使用0.1秒容差进行时间匹配
@@ -1156,12 +1167,12 @@ class GNSSAnalyzer:
                                 receiver_time_idx[rec_time] = i
                                 phone_time_idx[rec_time] = j
                             break
-                
+
                 common_times = sorted(common_times)
-                
+
                 if not common_times:
                     continue
-                
+
                 # 检查手机CMC是否存在明显线性漂移
                 phone_cmc_values = []
                 phone_times_list = []
@@ -1172,15 +1183,16 @@ class GNSSAnalyzer:
                         if phone_cmc_val is not None:
                             phone_cmc_values.append(phone_cmc_val)
                             phone_times_list.append(t)
-                
+
                 # 检查手机CMC线性漂移
                 if len(phone_cmc_values) < 10:  # 至少需要10个点才能判断线性趋势
                     filtered_combinations += 1
                     continue
-                
+
                 # 计算手机CMC的线性趋势
-                phone_cmc_linear_trend = self._check_linear_trend(phone_times_list, phone_cmc_values, self.r_squared_threshold)
-                
+                phone_cmc_linear_trend = self._check_linear_trend(phone_times_list, phone_cmc_values,
+                                                                  self.r_squared_threshold)
+
                 # 存储线性漂移检测的详细信息
                 sat_freq_key = f"{sat_id}_{freq}"
                 linear_drift_detailed[sat_freq_key] = {
@@ -1192,42 +1204,42 @@ class GNSSAnalyzer:
                     'min_r_squared': self.r_squared_threshold,  # 当前阈值
                     'min_slope_magnitude': 1e-6  # 当前阈值
                 }
-                
+
                 # 检查是否有明显线性漂移
                 if not phone_cmc_linear_trend['has_linear_drift']:
                     filtered_combinations += 1
                     continue
-                
+
                 dcmc_vals = []
                 dcmc_times = []
-                
+
                 for t in common_times:
                     rec_idx = receiver_time_idx[t]
                     phone_idx = phone_time_idx[t]
-                    
+
                     rec_cmc = receiver_data['cmc_m'][rec_idx]
                     phone_cmc_val = phone_data['code_phase_diff'][phone_idx]  # 使用code_phase_diff字段作为手机CMC
-                    
+
                     # dCMC = CMC_receiver - CMC_phone
                     dcmc_val = rec_cmc - phone_cmc_val
-                    
+
                     # 不再进行dCMC异常值过滤
                     # 大周跳的卫星-频率组合已在前面通过线性漂移检查被过滤
-                    
+
                     dcmc_vals.append(dcmc_val)
                     dcmc_times.append(t)
-                
+
                 if dcmc_vals:
                     sat_dcmc[freq] = {'times': dcmc_times, 'dcmc': dcmc_vals}
                 else:
                     filtered_combinations += 1
-                    
+
                 processed_combinations += 1
                 self.update_progress(int(processed_combinations / max(total_combinations, 1) * 100))
-                
+
             if sat_dcmc:
                 dcmc_results[sat_id] = sat_dcmc
-        
+
         # 处理手机独有卫星（如果启用）
         phone_only_processed = 0
         if self.enable_phone_only_analysis:
@@ -1239,18 +1251,19 @@ class GNSSAnalyzer:
                     for freq, phone_data in phone_freqs.items():
                         self._handle_phone_only_satellite(sat_id, freq, phone_data)
                         phone_only_processed += 1
-                        self.update_progress(int((processed_combinations + phone_only_processed) / max(total_combinations, 1) * 100))
-        
+                        self.update_progress(
+                            int((processed_combinations + phone_only_processed) / max(total_combinations, 1) * 100))
+
         print(f"dCMC计算完成:")
         print(f"  总组合数: {total_combinations}")
         print(f"  共视卫星通过线性漂移检查: {processed_combinations}")
         if self.enable_phone_only_analysis:
             print(f"  手机独有卫星处理数: {phone_only_processed}")
         print(f"  被过滤组合数: {filtered_combinations}")
-        
+
         # 存储线性漂移检测详细信息
         self.results['linear_drift_detailed'] = linear_drift_detailed
-        
+
         self.results['dcmc'] = dcmc_results
         return dcmc_results
 
@@ -1268,7 +1281,7 @@ class GNSSAnalyzer:
         返回结构：{sat_id: {freq: {'times': [...], 'cci_series': [...], 'arc_info': {...}}}}
         """
         self.start_stage(6, "提取码相不一致性时间序列", 100)
-        
+
         # 确保已计算dCMC（避免重复计算）
         dcmc_data = self.results.get('dcmc')
         if not dcmc_data or len(dcmc_data) == 0:
@@ -1280,44 +1293,43 @@ class GNSSAnalyzer:
         cci_results = {}
         total_sats = len(dcmc_data)
         processed_sats = 0
-        
+
         print(f"  正在处理 {len(dcmc_data)} 个卫星的CCI序列提取...")
-        
+
         for sat_id, freq_data in dcmc_data.items():
             sat_cci = {}
-            
+
             for freq, dcmc_info in freq_data.items():
                 times = dcmc_info['times']
                 dcmc_values = dcmc_info['dcmc']
-                
+
                 if not dcmc_values:
                     continue
-                    
+
                 # 识别连续弧段（基于时间间隔）
                 sat_freq_info = f"{sat_id}_{freq}"
                 arcs = self._identify_continuous_arcs(times, dcmc_values, sat_freq_info=sat_freq_info)
-                
+
                 all_cci_vals = []
                 all_times = []
                 arc_info = []
-                
+
                 for arc_idx, arc in enumerate(arcs):
                     arc_times = arc['times']
                     arc_dcmc = arc['values']
-                    
+
                     if len(arc_dcmc) < 2:  # 至少需要2个点才能去均值
                         continue
-                        
+
                     # 计算弧段平均值
                     arc_mean = sum(arc_dcmc) / len(arc_dcmc)
-                    
+
                     # 去除常数偏差：CCI = dCMC - arc_mean
                     cci_vals = [dcmc_val - arc_mean for dcmc_val in arc_dcmc]
-                    
-                    
+
                     all_cci_vals.extend(cci_vals)
                     all_times.extend(arc_times)
-                    
+
                     arc_info.append({
                         'arc_index': arc_idx,
                         'start_time': arc_times[0],
@@ -1327,23 +1339,22 @@ class GNSSAnalyzer:
                         'num_points': len(arc_dcmc),
                         'cci_range': max(cci_vals) - min(cci_vals) if cci_vals else 0
                     })
-                
+
                 if all_cci_vals:
                     sat_cci[freq] = {
                         'times': all_times,
                         'cci_series': all_cci_vals,
                         'arc_info': arc_info
                     }
-            
+
             if sat_cci:
                 cci_results[sat_id] = sat_cci
-                
+
             processed_sats += 1
             self.update_progress(int(processed_sats / max(total_sats, 1) * 100))
-            
+
         self.results['cci_series'] = cci_results
         return cci_results
-
 
     def calculate_roc_model(self, receiver_rinex_path: str = None) -> Dict:
         """计算各卫星系统各频率的ROC模型参数
@@ -1360,84 +1371,83 @@ class GNSSAnalyzer:
         返回结构：{system_freq: {'roc_rate': float, 'contributing_sats': [...], 'individual_rocs': {...}}}
         """
         self.start_stage(7, "计算ROC模型参数", 100)
-        
+
         # 确保已提取CCI序列（避免重复计算）
         if not self.results.get('cci_series'):
             if receiver_rinex_path is None:
                 raise ValueError("CCI序列数据不存在且未提供接收机RINEX文件路径")
             print("警告: CCI序列数据不存在，正在计算...")
             self.extract_cci_series(receiver_rinex_path)
-            
+
         cci_data = self.results['cci_series']
         roc_results = {}
-        
+
         # 按卫星系统和频率分组收集ROC值
         system_freq_rocs = {}  # {system_freq: [roc_values]}
         system_freq_contributing_sats = {}  # {system_freq: [sat_ids]}
         individual_rocs = {}  # {system_freq: {sat_id: roc_value}}
-        
+
         total_combinations = 0
         processed_combinations = 0
-        
+
         # 统计总的卫星-频率组合数
         for sat_id, freq_data in cci_data.items():
             total_combinations += len(freq_data)
-        
+
         for sat_id, freq_data in cci_data.items():
             # 获取卫星系统（卫星ID的第一个字符）
             sat_system = sat_id[0] if sat_id else 'Unknown'
-            
+
             for freq, cci_info in freq_data.items():
                 times = cci_info['times']
                 cci_vals = cci_info['cci_series']
-                
+
                 if len(cci_vals) < 2:
                     continue
-                    
+
                 # 将时间转换为秒数（从第一个时间点开始）
                 time_zero = times[0]
                 time_seconds = [(t - time_zero).total_seconds() for t in times]
-                
+
                 # 线性拟合：CCI = slope * time + intercept
                 try:
                     slope, intercept = self._linear_fit(time_seconds, cci_vals)
                     roc_value = slope  # 单位: m/s
-                    
-                    
+
                     # 创建卫星系统+频率的组合键
                     system_freq_key = f"{sat_system}_{freq}"
-                    
+
                     # 收集到对应系统-频率组
                     if system_freq_key not in system_freq_rocs:
                         system_freq_rocs[system_freq_key] = []
                         system_freq_contributing_sats[system_freq_key] = []
                         individual_rocs[system_freq_key] = {}
-                        
+
                     system_freq_rocs[system_freq_key].append(roc_value)
                     system_freq_contributing_sats[system_freq_key].append(sat_id)
                     individual_rocs[system_freq_key][sat_id] = roc_value
-                    
+
                 except Exception as e:
                     print(f"警告: 卫星 {sat_id} 频率 {freq} 线性拟合失败: {e}")
                     continue
-                    
+
                 processed_combinations += 1
                 self.update_progress(int(processed_combinations / max(total_combinations, 1) * 100))
-        
+
         # 计算各系统-频率的平均ROC和个体ROC
         individual_roc_models = {}  # 存储个体级ROC模型
-        
+
         for system_freq_key, roc_values in system_freq_rocs.items():
             if roc_values:
                 mean_roc = sum(roc_values) / len(roc_values)
-                std_roc = (sum((r - mean_roc)**2 for r in roc_values) / len(roc_values))**0.5
-                
+                std_roc = (sum((r - mean_roc) ** 2 for r in roc_values) / len(roc_values)) ** 0.5
+
                 # 计算变异系数（CV）
                 if mean_roc != 0:
                     roc_cv = abs(std_roc / mean_roc)
                 else:
                     roc_cv = float('inf') if std_roc > 0 else 0.0
-                
+
                 # 质量等级判断（只针对系统级模型）
                 if roc_cv < self.cv_threshold and len(roc_values) >= 3:
                     quality_level = "高质量"
@@ -1449,7 +1459,7 @@ class GNSSAnalyzer:
                     # 这种情况会建立个体级模型，不需要质量等级
                     quality_level = "个体级"
                     is_high_quality = True
-                
+
                 # 根据CV值决定使用系统级还是个体级ROC模型
                 if roc_cv < self.cv_threshold and len(roc_values) >= 3:
                     # CV<0.5且数据点≥3：使用系统级ROC模型
@@ -1467,15 +1477,16 @@ class GNSSAnalyzer:
                 else:
                     # CV≥阈值或数据点<3：为每个卫星建立个体ROC模型
                     if roc_cv >= self.cv_threshold:
-                        print(f"系统-频率 {system_freq_key} CV值过高({roc_cv:.3f}≥{self.cv_threshold:.1f})，建立个体ROC模型")
+                        print(
+                            f"系统-频率 {system_freq_key} CV值过高({roc_cv:.3f}≥{self.cv_threshold:.1f})，建立个体ROC模型")
                     else:
                         print(f"系统-频率 {system_freq_key} 数据点不足({len(roc_values)}<3)，建立个体ROC模型")
-                    
+
                     # 为个体级模型计算CV值（如果卫星数>=3）
                     individual_cv = 0.0
                     if len(roc_values) >= 3:
                         individual_cv = roc_cv  # 使用已计算的CV值
-                    
+
                     for sat_id, individual_roc in individual_rocs[system_freq_key].items():
                         individual_key = f"{sat_id}_{system_freq_key.split('_')[1]}"  # 如: E04_L7Q
                         individual_roc_models[individual_key] = {
@@ -1491,20 +1502,20 @@ class GNSSAnalyzer:
                             'system_freq_cv': individual_cv,  # 系统-频率组合的CV值
                             'system_freq_satellites': len(roc_values)  # 系统-频率组合的卫星数
                         }
-        
+
         # 处理手机独有卫星的ROC模型（如果启用）
         phone_only_roc_models = {}
         if self.enable_phone_only_analysis and 'phone_only_linear_drift' in self.results:
             print(f"开始建立手机独有卫星ROC模型...")
             phone_only_data = self.results['phone_only_linear_drift']
-            
+
             for sat_freq_key, drift_info in phone_only_data.items():
                 if drift_info['status'] == '有线性漂移':
                     # 为手机独有卫星建立个体ROC模型
                     phone_only_roc_models[sat_freq_key] = {
                         'roc_rate': drift_info['slope'],  # 使用斜率作为ROC
                         'roc_std': 0.0,  # 个体模型无标准差
-                        'roc_cv': 0.0,   # 个体模型无变异系数
+                        'roc_cv': 0.0,  # 个体模型无变异系数
                         'quality_level': "个体级",  # 个体级质量
                         'is_high_quality': True,  # 个体级默认为高质量
                         'contributing_sats': [sat_freq_key.split('_')[0]],  # 单个卫星
@@ -1513,16 +1524,17 @@ class GNSSAnalyzer:
                         'model_type': 'individual_level',  # 个体级模型
                         'data_source': 'phone_only'  # 标记数据来源
                     }
-            
+
             print(f"手机独有卫星ROC模型建立完成: {len(phone_only_roc_models)} 个")
-        
+
         # 合并系统级、个体级和手机独有卫星ROC模型
         all_roc_models = {**roc_results, **individual_roc_models, **phone_only_roc_models}
         self.results['roc_model'] = all_roc_models
         self.results['individual_roc_models'] = individual_roc_models
         self.results['phone_only_roc_models'] = phone_only_roc_models
-        
-        print(f"ROC模型计算完成: 系统级模型 {len(roc_results)} 个, 个体级模型 {len(individual_roc_models)} 个, 手机独有卫星模型 {len(phone_only_roc_models)} 个")
+
+        print(
+            f"ROC模型计算完成: 系统级模型 {len(roc_results)} 个, 个体级模型 {len(individual_roc_models)} 个, 手机独有卫星模型 {len(phone_only_roc_models)} 个")
         return all_roc_models
 
     def _linear_fit(self, x_values, y_values):
@@ -1530,19 +1542,19 @@ class GNSSAnalyzer:
         n = len(x_values)
         if n < 2:
             raise ValueError("至少需要2个点进行线性拟合")
-            
+
         sum_x = sum(x_values)
         sum_y = sum(y_values)
         sum_xy = sum(x * y for x, y in zip(x_values, y_values))
         sum_x2 = sum(x * x for x in x_values)
-        
+
         denominator = n * sum_x2 - sum_x * sum_x
         if abs(denominator) < 1e-10:
             raise ValueError("线性拟合失败：分母接近零")
-            
+
         slope = (n * sum_xy - sum_x * sum_y) / denominator
         intercept = (sum_y - slope * sum_x) / n
-        
+
         return slope, intercept
 
     def _handle_phone_only_satellite(self, sat_id: str, freq: str, phone_data: Dict):
@@ -1556,27 +1568,27 @@ class GNSSAnalyzer:
         # 检查手机CMC是否存在明显线性漂移
         phone_times = phone_data['times']
         phone_cmc_values = phone_data['code_phase_diff']
-        
+
         # 过滤None值
         valid_indices = [i for i, val in enumerate(phone_cmc_values) if val is not None]
         if len(valid_indices) < self.phone_only_min_data_points:
             return
-            
+
         # 提取有效数据
         valid_times = [phone_times[i] for i in valid_indices]
         valid_cmc_values = [phone_cmc_values[i] for i in valid_indices]
-        
+
         # 进行线性漂移检测
         try:
             phone_cmc_linear_trend = self._check_linear_trend(
                 valid_times, valid_cmc_values, self.r_squared_threshold
             )
-            
+
             # 存储手机独有卫星的线性漂移信息
             sat_freq_key = f"{sat_id}_{freq}"
             if 'phone_only_linear_drift' not in self.results:
                 self.results['phone_only_linear_drift'] = {}
-                
+
             self.results['phone_only_linear_drift'][sat_freq_key] = {
                 'status': '有线性漂移' if phone_cmc_linear_trend['has_linear_drift'] else '无线性漂移',
                 'r_squared': phone_cmc_linear_trend['r_squared'],
@@ -1587,12 +1599,12 @@ class GNSSAnalyzer:
                 'min_slope_magnitude': 1e-6,
                 'data_source': 'phone_only'  # 标记数据来源
             }
-            
+
             if phone_cmc_linear_trend['has_linear_drift']:
                 print(f"  {sat_freq_key}: R²={phone_cmc_linear_trend['r_squared']:.6f}, "
                       f"斜率={phone_cmc_linear_trend['slope']:.6e} m/s, "
                       f"数据点={len(valid_cmc_values)}")
-                      
+
         except Exception as e:
             print(f"手机独有卫星 {sat_id}_{freq} 线性漂移检测失败: {e}")
 
@@ -1610,16 +1622,16 @@ class GNSSAnalyzer:
         """
         if not times or not values:
             return []
-        
+
         arcs = []
         current_arc_times = []
         current_arc_values = []
-        
+
         for i, (time, value) in enumerate(zip(times, values)):
             if value is None:
                 # 遇到无效值，跳过但不分割弧段
                 continue
-            
+
             if not current_arc_times:
                 # 开始新弧段
                 current_arc_times.append(time)
@@ -1627,7 +1639,7 @@ class GNSSAnalyzer:
             else:
                 # 检查时间间隔
                 time_diff = (time - current_arc_times[-1]).total_seconds()
-                
+
                 # 弧段分割策略：仅基于时间间隔
                 if time_diff > max_gap_seconds:
                     # 时间间隔过大（>5分钟），分割弧段
@@ -1644,7 +1656,7 @@ class GNSSAnalyzer:
                     # 时间间隔<5分钟，继续当前弧段
                     current_arc_times.append(time)
                     current_arc_values.append(value)
-        
+
         # 添加最后一个弧段
         if current_arc_times:
             arcs.append({
@@ -1652,7 +1664,7 @@ class GNSSAnalyzer:
                 'values': current_arc_values,
                 'has_cycle_slip': False
             })
-        
+
         return arcs
 
     def _check_linear_trend(self, times, values, min_r_squared=0.5, min_slope_magnitude=1e-6):
@@ -1669,35 +1681,35 @@ class GNSSAnalyzer:
         """
         if len(times) < 3:
             return {'has_linear_drift': False, 'slope': 0.0, 'r_squared': 0.0, 'intercept': 0.0}
-        
+
         try:
             # 将时间转换为秒数（从第一个时间点开始）
             time_zero = times[0]
             time_seconds = [(t - time_zero).total_seconds() for t in times]
-            
+
             # 线性拟合
             slope, intercept = self._linear_fit(time_seconds, values)
-            
+
             # 计算R²
             y_mean = sum(values) / len(values)
             ss_tot = sum((y - y_mean) ** 2 for y in values)  # 总平方和
             ss_res = sum((y - (slope * x + intercept)) ** 2 for x, y in zip(time_seconds, values))  # 残差平方和
-            
+
             if ss_tot == 0:
                 r_squared = 0.0
             else:
                 r_squared = 1 - (ss_res / ss_tot)
-            
+
             # 判断是否存在明显线性漂移
             has_linear_drift = (r_squared >= min_r_squared and abs(slope) >= min_slope_magnitude)
-            
+
             return {
                 'has_linear_drift': has_linear_drift,
                 'slope': slope,
                 'r_squared': r_squared,
                 'intercept': intercept
             }
-            
+
         except Exception as e:
             print(f"线性趋势检查失败: {e}")
             return {'has_linear_drift': False, 'slope': 0.0, 'r_squared': 0.0, 'intercept': 0.0}
@@ -1717,66 +1729,66 @@ class GNSSAnalyzer:
         返回结构：{sat_id: {freq: {'times': [...], 'original_phase': [...], 'corrected_phase': [...], 'correction_applied': [...]}}}
         """
         self.start_stage(8, "校正载波相位观测值", 100)
-        
+
         # 确保已计算ROC模型（避免重复计算）
         if not self.results.get('roc_model'):
             if receiver_rinex_path is None:
                 raise ValueError("ROC模型数据不存在且未提供接收机RINEX文件路径")
             print("警告: ROC模型数据不存在，正在计算...")
             self.calculate_roc_model(receiver_rinex_path)
-            
+
         roc_model = self.results['roc_model']
         corrected_results = {}
-        
+
         # 获取有效的dCMC数据，这些是之前通过线性漂移检查的卫星-频率组合
         dcmc_data = self.results.get('dcmc', {})
         valid_combinations = set()
-        
+
         # 从dCMC数据中提取有效的卫星-频率组合
         for sat_id, freq_data in dcmc_data.items():
             for freq in freq_data.keys():
                 valid_combinations.add((sat_id, freq))
-        
+
         print(f"对 {len(valid_combinations)} 个通过线性漂移检查的卫星-频率组合进行校正")
-        
+
         # 显示ROC模型总结信息
         print(f"ROC模型包含 {len(roc_model)} 个系统-频率组合")
         # 只显示前5个ROC模型作为示例
         for i, (system_freq_key, roc_info) in enumerate(roc_model.items()):
             if i < 5:
-                print(f"  {system_freq_key}: ROC = {roc_info['roc_rate']:.6e} m/s, 参与卫星数 = {roc_info['num_satellites']}")
+                print(
+                    f"  {system_freq_key}: ROC = {roc_info['roc_rate']:.6e} m/s, 参与卫星数 = {roc_info['num_satellites']}")
             elif i == 5:
                 print(f"  ... 还有 {len(roc_model) - 5} 个ROC模型")
                 break
-        
+
         processed_combinations = 0
         total_combinations = len(valid_combinations)
-        
+
         for sat_id, freq_data in self.observations_meters.items():
             sat_corrected = {}
-            
+
             for freq, obs_data in freq_data.items():
                 # 只处理通过线性漂移检查的卫星-频率组合
                 if (sat_id, freq) not in valid_combinations:
                     continue
-                    
+
                 times = obs_data.get('times', [])
                 original_phase_m = obs_data.get('phase', [])  # 以米为单位
                 original_phase_cycle = obs_data.get('phase_cycle', [])  # 以周为单位
                 wavelengths = obs_data.get('wavelength', [])
-                
+
                 if not times or not original_phase_m:
                     continue
-                
-                    
+
                 # 检查该频率是否有ROC模型（优先系统级，其次个体级）
                 sat_system = sat_id[0] if sat_id else 'Unknown'
                 system_freq_key = f"{sat_system}_{freq}"
                 individual_key = f"{sat_id}_{freq}"
-                
+
                 roc_info = None
                 model_type = None
-                
+
                 # 优先使用系统级ROC模型
                 if system_freq_key in roc_model:
                     roc_info = roc_model[system_freq_key]
@@ -1787,42 +1799,42 @@ class GNSSAnalyzer:
                     model_type = "个体级"
                 else:
                     continue
-                    
+
                 roc_rate = roc_info['roc_rate']  # m/s
                 quality_level = roc_info['quality_level']
                 is_high_quality = roc_info['is_high_quality']
                 roc_cv = roc_info['roc_cv']
-                
+
                 # 根据质量等级决定是否进行校正
                 if quality_level == "低质量":
                     continue
-                
+
                 # 识别连续弧段（用于确定t0）
                 sat_freq_info = f"{sat_id}_{freq}"
                 arcs = self._identify_continuous_arcs(times, original_phase_m, sat_freq_info="")  # 不输出弧段分割信息
-                
+
                 corrected_phase_m = []
                 correction_applied = []
-                
+
                 # 存储校正的详细信息
                 medium_quality_details = []
                 high_quality_details = []
                 individual_level_details = []
-                
+
                 # 存储弧段信息用于报告
                 arc_info = []
-                
+
                 for arc_idx, arc in enumerate(arcs):
                     arc_times = arc['times']
                     arc_phase = arc['values']
-                    
+
                     if not arc_times:
                         continue
-                        
+
                     # 记录弧段信息
                     arc_duration = (arc_times[-1] - arc_times[0]).total_seconds()
                     has_cycle_slip = arc.get('has_cycle_slip', False)
-                    
+
                     # t0时间基准选择
                     if has_cycle_slip:
                         # 有周跳的弧段：以周跳历元为新的t0
@@ -1843,19 +1855,19 @@ class GNSSAnalyzer:
                         'data_points': len(arc_times),
                         'has_cycle_slip': has_cycle_slip
                     })
-                    
+
                     for t, phase_val in zip(arc_times, arc_phase):
                         if phase_val is None:
                             corrected_phase_m.append(None)
                             correction_applied.append(None)
                             continue
-                            
+
                         # 计算时间差（秒）
                         time_diff_seconds = (t - t0).total_seconds()
-                        
+
                         # 基础校正：L_corrected = L_original + ROC * (t - t0)
                         base_correction = -roc_rate * time_diff_seconds  # 米
-                        
+
                         # 根据质量等级和弧段特征应用不同的校正策略
                         if quality_level == "高质量":
                             if has_cycle_slip:
@@ -1864,7 +1876,7 @@ class GNSSAnalyzer:
                             else:
                                 # 无周跳的弧段：直接应用校正
                                 correction = base_correction
-                            
+
                             # 记录高质量校正详情
                             high_quality_details.append({
                                 'time': t,
@@ -1876,22 +1888,22 @@ class GNSSAnalyzer:
                                 'has_cycle_slip': has_cycle_slip,
                                 'model_type': model_type
                             })
-                            
+
                         elif quality_level == "中等质量":
                             # 中等质量：应用加权校正和时间衰减
                             weight = max(0.3, 1.0 - roc_cv)  # 基于CV的权重
                             time_weight = max(0.5, 1.0 - abs(time_diff_seconds) / 3600.0)  # 时间衰减
-                            
+
                             # 有周跳的弧段：进一步减少校正量
                             if has_cycle_slip:
                                 weight *= 0.3  # 额外减少70%
                                 max_correction = 0.02  # 最大校正量限制（2cm）
                             else:
                                 max_correction = 0.05  # 最大校正量限制（5cm）
-                            
+
                             correction = base_correction * weight * time_weight
                             correction = max(-max_correction, min(max_correction, correction))
-                            
+
                             # 记录中等质量校正详情
                             medium_quality_details.append({
                                 'time': t,
@@ -1905,7 +1917,7 @@ class GNSSAnalyzer:
                                 'has_cycle_slip': has_cycle_slip,
                                 'model_type': model_type
                             })
-                        
+
                         elif quality_level == "个体级":
                             # 个体级：直接应用校正（与高质量相同策略）
                             if has_cycle_slip:
@@ -1914,7 +1926,7 @@ class GNSSAnalyzer:
                             else:
                                 # 无周跳的弧段：直接应用校正
                                 correction = base_correction
-                            
+
                             # 记录个体级校正详情
                             individual_level_details.append({
                                 'time': t,
@@ -1926,12 +1938,12 @@ class GNSSAnalyzer:
                                 'has_cycle_slip': has_cycle_slip,
                                 'model_type': model_type
                             })
-                        
+
                         corrected_phase = phase_val + correction
-                        
+
                         corrected_phase_m.append(corrected_phase)
                         correction_applied.append(correction)
-                
+
                 # 存储校正详情
                 if medium_quality_details:
                     if 'medium_quality_correction_details' not in self.results:
@@ -1940,7 +1952,7 @@ class GNSSAnalyzer:
                         'details': medium_quality_details,
                         'arcs': arc_info
                     }
-                
+
                 if high_quality_details:
                     if 'high_quality_correction_details' not in self.results:
                         self.results['high_quality_correction_details'] = {}
@@ -1948,7 +1960,7 @@ class GNSSAnalyzer:
                         'details': high_quality_details,
                         'arcs': arc_info
                     }
-                
+
                 if individual_level_details:
                     if 'individual_level_correction_details' not in self.results:
                         self.results['individual_level_correction_details'] = {}
@@ -1956,7 +1968,7 @@ class GNSSAnalyzer:
                         'details': individual_level_details,
                         'arcs': arc_info
                     }
-                
+
                 if corrected_phase_m:
                     sat_corrected[freq] = {
                         'times': times,
@@ -1967,45 +1979,45 @@ class GNSSAnalyzer:
                         'wavelengths': wavelengths,
                         'roc_rate': roc_rate
                     }
-                
+
                 processed_combinations += 1
                 self.update_progress(int(processed_combinations / max(total_combinations, 1) * 100))
-            
+
             if sat_corrected:
                 corrected_results[sat_id] = sat_corrected
-        
+
         # 显示校正结果统计
         total_corrected_sats = len(corrected_results)
         total_corrected_combinations = sum(len(freq_data) for freq_data in corrected_results.values())
         total_corrected_obs = sum(
-            len(freq_data['corrected_phase']) 
-            for sat_data in corrected_results.values() 
+            len(freq_data['corrected_phase'])
+            for sat_data in corrected_results.values()
             for freq_data in sat_data.values()
         )
-        
+
         # 处理手机独有卫星的载波相位校正（如果启用）
         phone_only_corrected = 0
         if self.enable_phone_only_analysis and 'phone_only_roc_models' in self.results:
             print(f"\n开始校正手机独有卫星载波相位...")
             phone_only_models = self.results['phone_only_roc_models']
-            
+
             for sat_freq_key, roc_info in phone_only_models.items():
                 sat_id, freq = sat_freq_key.split('_', 1)
-                
+
                 # 检查手机观测数据中是否有该卫星-频率组合
                 if sat_id in self.observations_meters and freq in self.observations_meters[sat_id]:
                     phone_data = self.observations_meters[sat_id][freq]
                     times = phone_data['times']
                     original_phase = phone_data['phase']
-                    
+
                     if not original_phase:
                         continue
-                    
+
                     # 使用手机独有卫星的ROC进行校正
                     roc_rate = roc_info['roc_rate']
                     corrected_phase = []
                     correction_applied = []
-                    
+
                     # 获取波长信息
                     wavelengths = phone_data.get('wavelength', [])
                     if not wavelengths:
@@ -2014,10 +2026,10 @@ class GNSSAnalyzer:
                         default_wavelengths = self.wavelengths.get(sat_system, {})
                         wavelength = default_wavelengths.get(freq)
                         wavelengths = [wavelength] * len(times) if wavelength else [None] * len(times)
-                    
+
                     # 使用第一个时间作为t0
                     t0 = times[0]
-                    
+
                     for i, (t, phase_val) in enumerate(zip(times, original_phase)):
                         if phase_val is not None:
                             time_diff = (t - t0).total_seconds()
@@ -2027,11 +2039,11 @@ class GNSSAnalyzer:
                         else:
                             corrected_phase.append(None)
                             correction_applied.append(0.0)
-                    
+
                     # 存储校正结果
                     if sat_id not in corrected_results:
                         corrected_results[sat_id] = {}
-                    
+
                     corrected_results[sat_id][freq] = {
                         'times': times,
                         'original_phase': original_phase,
@@ -2042,23 +2054,23 @@ class GNSSAnalyzer:
                         'model_type': 'phone_only',
                         'data_source': 'phone_only'
                     }
-                    
+
                     phone_only_corrected += 1
                     print(f"  校正手机独有卫星 {sat_freq_key}: ROC={roc_rate:.6e} m/s")
-            
+
             print(f"手机独有卫星校正完成: {phone_only_corrected} 个组合")
-        
+
         print(f"\n载波相位校正完成:")
         print(f"  校正卫星数: {total_corrected_sats}")
         print(f"  校正组合数: {total_corrected_combinations}")
         print(f"  校正观测值数: {total_corrected_obs}")
         if self.enable_phone_only_analysis:
             print(f"  手机独有卫星校正组合数: {phone_only_corrected}")
-        
+
         # 显示个位数秒数校正统计
         if hasattr(self, '_debug_single_digit_count'):
             print(f"  个位数秒数校正数: {self._debug_single_digit_count}")
-        
+
         self.results['corrected_phase'] = corrected_results
         return corrected_results
 
@@ -2069,122 +2081,130 @@ class GNSSAnalyzer:
         report_lines.append("码相不一致性建模报告")
         report_lines.append("=" * 80)
         report_lines.append("")
-        
+
         # 1. 线性漂移检测结果汇总
         if 'linear_drift_detailed' in self.results:
             report_lines.append("1. 线性漂移检测结果")
             report_lines.append("-" * 50)
             linear_drift_data = self.results['linear_drift_detailed']
-            
+
             # 分离有线性漂移和无线性漂移的卫星-频率组合
             has_drift = []
             no_drift = []
-            
+
             for sat_freq, drift_info in linear_drift_data.items():
                 if drift_info['status'] == '有线性漂移':
                     has_drift.append((sat_freq, drift_info))
                 else:
                     no_drift.append((sat_freq, drift_info))
-            
+
             # 显示阈值信息（只显示一次）
             if linear_drift_data:
                 sample_info = list(linear_drift_data.values())[0]
-                report_lines.append(f"检测阈值: R²≥{sample_info['min_r_squared']}, |斜率|≥{sample_info['min_slope_magnitude']}")
+                report_lines.append(
+                    f"检测阈值: R²≥{sample_info['min_r_squared']}, |斜率|≥{sample_info['min_slope_magnitude']}")
                 report_lines.append("")
-            
+
             # 有线性漂移的卫星-频率组合
             report_lines.append(f"1.1 检测到线性漂移的卫星-频率组合 ({len(has_drift)}个):")
             report_lines.append("-" * 30)
             if has_drift:
                 for sat_freq, drift_info in has_drift:
-                    report_lines.append(f"  {sat_freq}: R²={drift_info['r_squared']:.6f}, 斜率={drift_info['slope']:.6e} m/s, 数据点={drift_info['data_points']}")
+                    report_lines.append(
+                        f"  {sat_freq}: R²={drift_info['r_squared']:.6f}, 斜率={drift_info['slope']:.6e} m/s, 数据点={drift_info['data_points']}")
             else:
                 report_lines.append("  无")
             report_lines.append("")
-            
+
             # 无线性漂移的卫星-频率组合
             report_lines.append(f"1.2 未检测到线性漂移的卫星-频率组合 ({len(no_drift)}个):")
             report_lines.append("-" * 30)
             if no_drift:
                 for sat_freq, drift_info in no_drift:
-                    report_lines.append(f"  {sat_freq}: R²={drift_info['r_squared']:.6f}, 斜率={drift_info['slope']:.6e} m/s, 数据点={drift_info['data_points']}")
+                    report_lines.append(
+                        f"  {sat_freq}: R²={drift_info['r_squared']:.6f}, 斜率={drift_info['slope']:.6e} m/s, 数据点={drift_info['data_points']}")
             else:
                 report_lines.append("  无")
             report_lines.append("")
-        
+
         # 1.3 手机独有卫星线性漂移检测结果
         if 'phone_only_linear_drift' in self.results and self.results['phone_only_linear_drift']:
             report_lines.append("1.3 手机独有卫星线性漂移检测结果")
             report_lines.append("-" * 50)
             phone_only_data = self.results['phone_only_linear_drift']
-            
+
             # 分离有线性漂移和无线性漂移的手机独有卫星
             phone_has_drift = []
             phone_no_drift = []
-            
+
             for sat_freq, drift_info in phone_only_data.items():
                 if drift_info['status'] == '有线性漂移':
                     phone_has_drift.append((sat_freq, drift_info))
                 else:
                     phone_no_drift.append((sat_freq, drift_info))
-            
+
             # 有线性漂移的手机独有卫星
             report_lines.append(f"1.3.1 检测到线性漂移的手机独有卫星 ({len(phone_has_drift)}个):")
             report_lines.append("-" * 30)
             if phone_has_drift:
                 for sat_freq, drift_info in phone_has_drift:
-                    report_lines.append(f"  {sat_freq}: R²={drift_info['r_squared']:.6f}, 斜率={drift_info['slope']:.6e} m/s, 数据点={drift_info['data_points']}")
+                    report_lines.append(
+                        f"  {sat_freq}: R²={drift_info['r_squared']:.6f}, 斜率={drift_info['slope']:.6e} m/s, 数据点={drift_info['data_points']}")
             else:
                 report_lines.append("  无")
             report_lines.append("")
-            
+
             # 无线性漂移的手机独有卫星
             report_lines.append(f"1.3.2 未检测到线性漂移的手机独有卫星 ({len(phone_no_drift)}个):")
             report_lines.append("-" * 30)
             if phone_no_drift:
                 for sat_freq, drift_info in phone_no_drift:
-                    report_lines.append(f"  {sat_freq}: R²={drift_info['r_squared']:.6f}, 斜率={drift_info['slope']:.6e} m/s, 数据点={drift_info['data_points']}")
+                    report_lines.append(
+                        f"  {sat_freq}: R²={drift_info['r_squared']:.6f}, 斜率={drift_info['slope']:.6e} m/s, 数据点={drift_info['data_points']}")
             else:
                 report_lines.append("  无")
             report_lines.append("")
-        
+
         # 2. ROC模型质量分析
         if 'roc_model' in self.results:
             report_lines.append("2. ROC模型质量分析")
             report_lines.append("-" * 50)
             roc_model = self.results['roc_model']
-            
+
             # 按模型类型分组
             system_models = []
             individual_models = []
-            
+
             for system_freq, roc_info in roc_model.items():
                 model_type = roc_info.get('model_type', 'system_level')
-                
+
                 if model_type == 'individual_level':
                     individual_models.append((system_freq, roc_info))
                 else:
                     system_models.append((system_freq, roc_info))
-            
+
             # 显示模型选择策略
-            report_lines.append(f"模型选择策略: CV<{self.cv_threshold}且数据点≥3→系统级模型, CV≥{self.cv_threshold}或数据点<3→个体级模型")
+            report_lines.append(
+                f"模型选择策略: CV<{self.cv_threshold}且数据点≥3→系统级模型, CV≥{self.cv_threshold}或数据点<3→个体级模型")
             report_lines.append("")
-            
+
             # 系统级ROC模型
             report_lines.append(f"2.1 系统级ROC模型 ({len(system_models)}个):")
             report_lines.append("-" * 30)
             if system_models:
                 for system_freq, roc_info in system_models:
                     parts = system_freq.split('_', 1)
-                    system_name = {'G': 'GPS', 'R': 'GLONASS', 'E': 'Galileo', 'C': 'BDS', 'J': 'QZSS', 'I': 'IRNSS'}.get(parts[0], parts[0])
+                    system_name = {'G': 'GPS', 'R': 'GLONASS', 'E': 'Galileo', 'C': 'BDS', 'J': 'QZSS',
+                                   'I': 'IRNSS'}.get(parts[0], parts[0])
                     contributing_sats = roc_info['contributing_sats']
                     quality = roc_info['quality_level']
-                    report_lines.append(f"  {system_name} {parts[1]}: ROC={roc_info['roc_rate']:.6e} m/s, CV={roc_info['roc_cv']:.3f} ({quality})")
+                    report_lines.append(
+                        f"  {system_name} {parts[1]}: ROC={roc_info['roc_rate']:.6e} m/s, CV={roc_info['roc_cv']:.3f} ({quality})")
                     report_lines.append(f"    参与卫星 ({len(contributing_sats)}个): {', '.join(contributing_sats)}")
             else:
                 report_lines.append("  无")
             report_lines.append("")
-            
+
             # 个体级ROC模型
             report_lines.append(f"2.2 个体级ROC模型 ({len(individual_models)}个):")
             report_lines.append("-" * 30)
@@ -2198,42 +2218,47 @@ class GNSSAnalyzer:
                     if system not in individual_by_system:
                         individual_by_system[system] = []
                     individual_by_system[system].append((sat_id, freq, roc_info))
-                
+
                 for system, sats in individual_by_system.items():
-                    system_name = {'G': 'GPS', 'R': 'GLONASS', 'E': 'Galileo', 'C': 'BDS', 'J': 'QZSS', 'I': 'IRNSS'}.get(system, system)
+                    system_name = {'G': 'GPS', 'R': 'GLONASS', 'E': 'Galileo', 'C': 'BDS', 'J': 'QZSS',
+                                   'I': 'IRNSS'}.get(system, system)
                     report_lines.append(f"  {system_name}系统:")
-                    
+
                     # 按频率分组，显示CV值
                     freq_groups = {}
                     for sat_id, freq, roc_info in sats:
                         if freq not in freq_groups:
                             freq_groups[freq] = []
                         freq_groups[freq].append((sat_id, roc_info))
-                    
+
                     for freq, freq_sats in freq_groups.items():
                         # 检查是否有CV值信息
-                        has_cv_info = any('system_freq_cv' in roc_info and roc_info['system_freq_cv'] > 0 for _, roc_info in freq_sats)
-                        
+                        has_cv_info = any(
+                            'system_freq_cv' in roc_info and roc_info['system_freq_cv'] > 0 for _, roc_info in
+                            freq_sats)
+
                         if has_cv_info:
                             # 获取CV值（所有卫星的CV值应该相同）
-                            cv_value = next(roc_info['system_freq_cv'] for _, roc_info in freq_sats if 'system_freq_cv' in roc_info and roc_info['system_freq_cv'] > 0)
-                            sat_count = next(roc_info['system_freq_satellites'] for _, roc_info in freq_sats if 'system_freq_satellites' in roc_info)
+                            cv_value = next(roc_info['system_freq_cv'] for _, roc_info in freq_sats if
+                                            'system_freq_cv' in roc_info and roc_info['system_freq_cv'] > 0)
+                            sat_count = next(roc_info['system_freq_satellites'] for _, roc_info in freq_sats if
+                                             'system_freq_satellites' in roc_info)
                             report_lines.append(f"    {freq} (CV={cv_value:.3f}, {sat_count}个卫星):")
                         else:
                             report_lines.append(f"    {freq}:")
-                        
+
                         for sat_id, roc_info in freq_sats:
                             report_lines.append(f"      {sat_id}: ROC={roc_info['roc_rate']:.6e} m/s")
             else:
                 report_lines.append("  无")
             report_lines.append("")
-            
+
             # 手机独有卫星ROC模型
             if 'phone_only_roc_models' in self.results and self.results['phone_only_roc_models']:
                 report_lines.append(f"2.4 手机独有卫星ROC模型 ({len(self.results['phone_only_roc_models'])}个):")
                 report_lines.append("-" * 30)
                 phone_only_models = self.results['phone_only_roc_models']
-                
+
                 # 按卫星系统分组显示
                 phone_only_by_system = {}
                 for sat_freq, roc_info in phone_only_models.items():
@@ -2243,52 +2268,53 @@ class GNSSAnalyzer:
                     if system not in phone_only_by_system:
                         phone_only_by_system[system] = []
                     phone_only_by_system[system].append((sat_id, freq, roc_info))
-                
+
                 for system, sats in phone_only_by_system.items():
-                    system_name = {'G': 'GPS', 'R': 'GLONASS', 'E': 'Galileo', 'C': 'BDS', 'J': 'QZSS', 'I': 'IRNSS'}.get(system, system)
+                    system_name = {'G': 'GPS', 'R': 'GLONASS', 'E': 'Galileo', 'C': 'BDS', 'J': 'QZSS',
+                                   'I': 'IRNSS'}.get(system, system)
                     report_lines.append(f"  {system_name}系统:")
                     for sat_id, freq, roc_info in sats:
                         report_lines.append(f"    {sat_id} {freq}: ROC={roc_info['roc_rate']:.6e} m/s (手机独有)")
                 report_lines.append("")
-            
+
             report_lines.append("")
-        
+
         # 3. 载波相位校正详细信息
         has_high_quality = 'high_quality_correction_details' in self.results
         has_medium_quality = 'medium_quality_correction_details' in self.results
         has_individual_level = 'individual_level_correction_details' in self.results
-        
+
         if has_high_quality or has_medium_quality or has_individual_level:
             report_lines.append("3. 载波相位校正详细信息")
             report_lines.append("-" * 50)
-            
+
             # 分离系统级和个体级校正信息
             system_level_high = {}
             individual_level_high = {}
             system_level_medium = {}
             individual_level_medium = {}
-            
+
             # 处理系统级校正信息
             if has_high_quality:
                 system_level_high = self.results['high_quality_correction_details']
-            
+
             if has_medium_quality:
                 system_level_medium = self.results['medium_quality_correction_details']
-            
+
             # 处理个体级校正详情
             if has_individual_level:
                 individual_level_high = self.results['individual_level_correction_details']
-            
+
             # 3.1 系统级校正信息
             if system_level_high or system_level_medium:
                 report_lines.append("3.1 系统级校正信息")
                 report_lines.append("-" * 30)
-                
+
                 # 合并所有系统级校正信息
                 all_system = {**system_level_high, **system_level_medium}
                 report_lines.append(f"系统级校正 ({len(all_system)}个卫星-频率组合):")
                 report_lines.append("-" * 35)
-                
+
                 for sat_freq, data in all_system.items():
                     details = data['details'] if isinstance(data, dict) and 'details' in data else data
                     arcs = data['arcs'] if isinstance(data, dict) and 'arcs' in data else []
@@ -2301,7 +2327,7 @@ class GNSSAnalyzer:
                         max_abs_correction = max(abs(max_correction), abs(min_correction))
                     else:
                         max_correction = min_correction = avg_correction = max_abs_correction = 0.0
-                    
+
                     report_lines.append(f"  {sat_freq}:")
                     report_lines.append(f"    校正次数: {len(details)}")
                     report_lines.append(f"    最大校正: {max_correction:.6f}m")
@@ -2309,34 +2335,36 @@ class GNSSAnalyzer:
                     report_lines.append(f"    平均校正: {avg_correction:.6f}m")
                     report_lines.append(f"    最大绝对校正: {max_abs_correction:.6f}m")
                     report_lines.append(f"    ROC CV: {details[0]['roc_cv']:.3f}")
-                    
+
                     # 显示前5个校正详情
                     report_lines.append("    校正详情 (前5个):")
                     for i, detail in enumerate(details[:5]):
-                        report_lines.append(f"      {i+1}. 时间: {detail['time']}, 时间差: {detail['time_diff_seconds']:.1f}s, 校正: {detail['final_correction']:.6f}m")
+                        report_lines.append(
+                            f"      {i + 1}. 时间: {detail['time']}, 时间差: {detail['time_diff_seconds']:.1f}s, 校正: {detail['final_correction']:.6f}m")
                     if len(details) > 5:
                         report_lines.append(f"      ... 还有 {len(details) - 5} 个校正记录")
-                    
+
                     # 显示后5个校正详情
                     if len(details) > 5:
                         report_lines.append("    校正详情 (后5个):")
                         for i, detail in enumerate(details[-5:], len(details) - 4):
-                            report_lines.append(f"      {i}. 时间: {detail['time']}, 时间差: {detail['time_diff_seconds']:.1f}s, 校正: {detail['final_correction']:.6f}m")
+                            report_lines.append(
+                                f"      {i}. 时间: {detail['time']}, 时间差: {detail['time_diff_seconds']:.1f}s, 校正: {detail['final_correction']:.6f}m")
                     report_lines.append("")
             else:
                 report_lines.append("3.1 系统级校正信息: 无")
                 report_lines.append("")
-            
+
             # 3.2 个体级校正信息
             if individual_level_high or individual_level_medium:
                 report_lines.append("3.2 个体级校正信息")
                 report_lines.append("-" * 30)
-                
+
                 # 合并所有个体级校正信息
                 all_individual = {**individual_level_high, **individual_level_medium}
                 report_lines.append(f"个体级校正 ({len(all_individual)}个卫星-频率组合):")
                 report_lines.append("-" * 35)
-                
+
                 for sat_freq, data in all_individual.items():
                     details = data['details'] if isinstance(data, dict) and 'details' in data else data
                     arcs = data['arcs'] if isinstance(data, dict) and 'arcs' in data else []
@@ -2349,7 +2377,7 @@ class GNSSAnalyzer:
                         max_abs_correction = max(abs(max_correction), abs(min_correction))
                     else:
                         max_correction = min_correction = avg_correction = max_abs_correction = 0.0
-                    
+
                     report_lines.append(f"  {sat_freq}:")
                     report_lines.append(f"    校正次数: {len(details)}")
                     report_lines.append(f"    最大校正: {max_correction:.6f}m")
@@ -2357,44 +2385,46 @@ class GNSSAnalyzer:
                     report_lines.append(f"    平均校正: {avg_correction:.6f}m")
                     report_lines.append(f"    最大绝对校正: {max_abs_correction:.6f}m")
                     report_lines.append(f"    ROC CV: {details[0]['roc_cv']:.3f}")
-                    
+
                     # 显示前5个校正详情
                     report_lines.append("    校正详情 (前5个):")
                     for i, detail in enumerate(details[:5]):
-                        report_lines.append(f"      {i+1}. 时间: {detail['time']}, 时间差: {detail['time_diff_seconds']:.1f}s, 校正: {detail['final_correction']:.6f}m")
+                        report_lines.append(
+                            f"      {i + 1}. 时间: {detail['time']}, 时间差: {detail['time_diff_seconds']:.1f}s, 校正: {detail['final_correction']:.6f}m")
                     if len(details) > 5:
                         report_lines.append(f"      ... 还有 {len(details) - 5} 个校正记录")
-                    
+
                     # 显示后5个校正详情
                     if len(details) > 5:
                         report_lines.append("    校正详情 (后5个):")
                         for i, detail in enumerate(details[-5:], len(details) - 4):
-                            report_lines.append(f"      {i}. 时间: {detail['time']}, 时间差: {detail['time_diff_seconds']:.1f}s, 校正: {detail['final_correction']:.6f}m")
+                            report_lines.append(
+                                f"      {i}. 时间: {detail['time']}, 时间差: {detail['time_diff_seconds']:.1f}s, 校正: {detail['final_correction']:.6f}m")
                     report_lines.append("")
             else:
                 report_lines.append("3.2 个体级校正信息: 无")
                 report_lines.append("")
-            
+
             # 3.3 手机独有卫星校正信息
             if 'corrected_phase' in self.results:
                 corrected_data = self.results['corrected_phase']
                 phone_only_corrections = {}
-                
+
                 # 筛选手机独有卫星的校正信息
                 for sat_id, freq_data in corrected_data.items():
                     for freq, correction_info in freq_data.items():
                         if correction_info.get('data_source') == 'phone_only':
                             sat_freq_key = f"{sat_id}_{freq}"
                             phone_only_corrections[sat_freq_key] = correction_info
-                
+
                 if phone_only_corrections:
                     report_lines.append("3.3 手机独有卫星校正信息")
                     report_lines.append("-" * 30)
-                    
+
                     for sat_freq, correction_info in phone_only_corrections.items():
                         corrections = correction_info.get('correction_applied', [])
                         times = correction_info.get('times', [])
-                        
+
                         if corrections:
                             max_correction = max(corrections)
                             min_correction = min(corrections)
@@ -2402,10 +2432,10 @@ class GNSSAnalyzer:
                             max_abs_correction = max(abs(max_correction), abs(min_correction))
                         else:
                             max_correction = min_correction = avg_correction = max_abs_correction = 0.0
-                        
+
                         roc_rate = correction_info.get('roc_rate', 0.0)
                         roc_cv = correction_info.get('roc_cv', 0.0)
-                        
+
                         report_lines.append(f"  {sat_freq}:")
                         report_lines.append(f"    校正次数: {len(corrections)}")
                         report_lines.append(f"    最大校正: {max_correction:.6f}m")
@@ -2415,7 +2445,7 @@ class GNSSAnalyzer:
                         report_lines.append(f"    ROC: {roc_rate:.6e} m/s")
                         if roc_cv > 0:
                             report_lines.append(f"    ROC CV: {roc_cv:.3f}")
-                        
+
                         # 显示前5个校正详情
                         if len(corrections) > 0 and len(times) > 0:
                             report_lines.append("    校正详情 (前5个):")
@@ -2423,27 +2453,28 @@ class GNSSAnalyzer:
                                 time_diff = 0.0
                                 if i > 0 and len(times) > i:
                                     time_diff = (times[i] - times[0]).total_seconds()
-                                report_lines.append(f"      {i+1}. 时间: {times[i]}, 时间差: {time_diff:.1f}s, 校正: {corrections[i]:.6f}m")
-                            
+                                report_lines.append(
+                                    f"      {i + 1}. 时间: {times[i]}, 时间差: {time_diff:.1f}s, 校正: {corrections[i]:.6f}m")
+
                             if len(corrections) > 5:
                                 report_lines.append(f"      ... 还有 {len(corrections) - 5} 个校正记录")
-                                
+
                                 # 显示后5个校正详情
                                 report_lines.append("    校正详情 (后5个):")
                                 for i in range(max(0, len(corrections) - 5), len(corrections)):
                                     time_diff = 0.0
                                     if i > 0 and len(times) > i:
                                         time_diff = (times[i] - times[0]).total_seconds()
-                                    report_lines.append(f"      {i+1}. 时间: {times[i]}, 时间差: {time_diff:.1f}s, 校正: {corrections[i]:.6f}m")
+                                    report_lines.append(
+                                        f"      {i + 1}. 时间: {times[i]}, 时间差: {time_diff:.1f}s, 校正: {corrections[i]:.6f}m")
                         report_lines.append("")
                 else:
                     report_lines.append("3.3 手机独有卫星校正信息: 无")
                     report_lines.append("")
-            
-                report_lines.append("")
-        
-        return "\n".join(report_lines)
 
+                report_lines.append("")
+
+        return "\n".join(report_lines)
 
     def generate_corrected_rinex_file(self, receiver_rinex_path: str, output_path: str = None) -> str:
         """生成校正后的手机RINEX数据文件
@@ -2456,27 +2487,27 @@ class GNSSAnalyzer:
             生成的RINEX文件路径
         """
         self.start_stage(9, "生成校正后的RINEX文件", 100)
-        
+
         # 确保已校正载波相位
         if not self.results.get('corrected_phase'):
             self.correct_phase_observations(receiver_rinex_path)
-            
+
         corrected_data = self.results['corrected_phase']
-        
+
         # 显示校正数据总结信息
         print(f"校正数据包含 {len(corrected_data)} 颗卫星")
-        
+
         if not self.input_file_path:
             raise ValueError("未设置输入文件路径，无法生成校正后的RINEX文件")
-            
+
         # 码相不一致处理直接使用原始文件
         input_file = self.input_file_path
         phone_file_name = os.path.basename(self.input_file_path)
         phone_file_name_no_ext = os.path.splitext(phone_file_name)[0]
         phone_result_dir = os.path.join("results", phone_file_name_no_ext)
-        
+
         print(f"使用原始文件进行码相不一致性建模和校正: {phone_file_name}")
-            
+
         # 生成输出文件路径（保存到手机文件results文件夹下的code-carrier inconsistency子文件夹）
         if output_path is None:
             # 使用手机文件的结果目录
@@ -2485,7 +2516,7 @@ class GNSSAnalyzer:
                 cci_dir = os.path.join(phone_result_dir, "code-carrier inconsistency")
                 if not os.path.exists(cci_dir):
                     os.makedirs(cci_dir)
-                
+
                 # 使用原始文件名，添加-cc inconsistency后缀
                 original_basename = os.path.basename(self.input_file_path)
                 original_name, original_ext = os.path.splitext(original_basename)
@@ -2495,22 +2526,22 @@ class GNSSAnalyzer:
                 input_basename = os.path.basename(input_file)
                 input_name, input_ext = os.path.splitext(input_basename)
                 output_path = os.path.join(input_dir, f"{input_name}_corrected{input_ext}")
-            
+
         # 读取RINEX文件内容
         with open(input_file, 'r', encoding='utf-8') as f:
             original_lines = f.readlines()
-            
+
         # 保存RINEX数据以供_apply_phase_correction_to_line使用
         # 这里我们需要读取文件头信息来获取观测类型
         self.rinex_data = {'header': {}}
-        
+
         # 解析文件头以获取观测类型信息
         header_end = -1
         for i, line in enumerate(original_lines):
             if 'END OF HEADER' in line:
                 header_end = i
                 break
-                
+
         if header_end > 0:
             for i in range(header_end):
                 line = original_lines[i]
@@ -2532,8 +2563,9 @@ class GNSSAnalyzer:
                         else:
                             break
                     if system:
-                        self.rinex_data['header'][f'obs_types_{system}'] = obs_types_list[:num_types] if num_types > 0 else obs_types_list
-            
+                        self.rinex_data['header'][f'obs_types_{system}'] = obs_types_list[
+                                                                           :num_types] if num_types > 0 else obs_types_list
+
         # 解析历元时间戳（参考remove_outliers_and_save函数）
         epoch_timestamps = {}
         current_epoch = 0
@@ -2548,7 +2580,7 @@ class GNSSAnalyzer:
                     # 保留原始秒数格式，不进行四舍五入
                     timestamp = f"{year} {month} {day} {hour} {minute} {second_float}"
                     epoch_timestamps[current_epoch] = timestamp
-        
+
         # 解析观测类型信息（参考remove_outliers_and_save函数）
         system_obs_info = {}  # {系统: {'obs_types': [], 'freq_to_indices': {频率: {观测类型: 字段索引}}}}
         for line in original_lines:
@@ -2572,54 +2604,55 @@ class GNSSAnalyzer:
                     'obs_types': obs_types,
                     'freq_to_indices': freq_to_indices
                 }
-        
+
         # 复制原始文件内容到输出
         output_lines = original_lines.copy()
-            
-        
+
         # 记录修改详情
-        modification_details = defaultdict(list)  # {sat_id: [{epoch, freq, original_phase, corrected_phase, correction_amount}]}
+        modification_details = defaultdict(
+            list)  # {sat_id: [{epoch, freq, original_phase, corrected_phase, correction_amount}]}
         total_modifications = 0
         modified_satellites = set()
         first_epoch_processed = False  # 标记是否已处理第一个历元
-        
+
         # 处理每个有校正数据的卫星（参考remove_outliers_and_save函数）
         for sat_id, freq_data in corrected_data.items():
             sat_system = sat_id[0]
             sat_prn = sat_id[1:].zfill(2)
             system_info = system_obs_info.get(sat_system, {})
             freq_indices = system_info.get('freq_to_indices', {})
-            
+
             if not freq_indices:
                 continue  # 跳过无观测类型信息的卫星
-            
+
             # 处理每个频率的校正数据
             for freq, correction_data in freq_data.items():
                 times = correction_data['times']
                 corrected_phases = correction_data['corrected_phase']
                 wavelengths = correction_data['wavelengths']
-                
+
                 if freq not in freq_indices or 'phase' not in freq_indices[freq]:
                     continue  # 跳过无相位索引的频率
-                
+
                 phase_field_idx = freq_indices[freq]['phase']
-                
+
                 # 对每个时间点应用校正
-                for time_idx, (correction_time, corrected_phase_m, wavelength) in enumerate(zip(times, corrected_phases, wavelengths)):
+                for time_idx, (correction_time, corrected_phase_m, wavelength) in enumerate(
+                        zip(times, corrected_phases, wavelengths)):
                     if corrected_phase_m is None or wavelength is None:
                         continue
-                    
+
                     # 确保wavelength不为None
                     if wavelength is None:
                         continue
-                    
+
                     # 查找对应的历元（假设时间顺序一致）
                     epoch_idx = time_idx + 1  # 历元编号从1开始
                     if epoch_idx not in epoch_timestamps:
                         continue
-                    
+
                     timestamp = epoch_timestamps[epoch_idx]
-                    
+
                     # 定位历元行（使用时间戳比较而不是字符串匹配）
                     epoch_start = -1
                     for i, line in enumerate(output_lines):
@@ -2627,8 +2660,12 @@ class GNSSAnalyzer:
                             parts = line[1:].split()
                             if len(parts) >= 6:
                                 try:
-                                    year = int(parts[0]); month = int(parts[1]); day = int(parts[2])
-                                    hour = int(parts[3]); minute = int(parts[4]); second_float = float(parts[5])
+                                    year = int(parts[0])
+                                    month = int(parts[1])
+                                    day = int(parts[2])
+                                    hour = int(parts[3])
+                                    minute = int(parts[4])
+                                    second_float = float(parts[5])
                                     line_epoch = pd.Timestamp(
                                         year=year, month=month, day=day,
                                         hour=hour, minute=minute, second=int(second_float),
@@ -2642,7 +2679,7 @@ class GNSSAnalyzer:
                                     continue
                     if epoch_start < 0:
                         continue
-                    
+
                     # 定位该卫星在历元中的数据行
                     sat_line_idx = -1
                     j = epoch_start + 1
@@ -2654,11 +2691,11 @@ class GNSSAnalyzer:
                         j += 1
                     if sat_line_idx < 0:
                         continue
-                    
+
                     # 修改相位观测值字段
                     original_line = output_lines[sat_line_idx]
                     modified_line = list(original_line)
-                    
+
                     # 计算校正量（从ROC模型获取）
                     correction_amount = 0
                     if self.results.get('roc_model'):
@@ -2666,7 +2703,7 @@ class GNSSAnalyzer:
                         if system_freq_key in self.results['roc_model']:
                             roc_info = self.results['roc_model'][system_freq_key]
                             roc_rate = roc_info['roc_rate']
-                            
+
                             # 计算校正量：ROC * (t - t0)
                             # 使用与correct_phase_observations相同的逻辑
                             if times:
@@ -2676,7 +2713,7 @@ class GNSSAnalyzer:
                                     if abs((t - correction_time).total_seconds()) < 0.1:  # 0.1秒容差
                                         time_idx = idx
                                         break
-                                
+
                                 if time_idx is not None and 'correction_applied' in freq_data:
                                     # 直接使用已计算的校正量
                                     correction_amount = freq_data['correction_applied'][time_idx]
@@ -2685,34 +2722,34 @@ class GNSSAnalyzer:
                                     t0 = times[0]
                                     time_diff_seconds = (correction_time - t0).total_seconds()
                                     correction_amount = -roc_rate * time_diff_seconds
-                    
+
                     # 定位相位字段位置
                     start_pos = 3 + phase_field_idx * 16  # 3: 卫星标识长度
                     end_pos = start_pos + 16
-                    
+
                     if end_pos > len(modified_line):
                         continue  # 防止越界
-                    
+
                     # 读取原始相位值
                     original_field = original_line[start_pos:end_pos].strip()
                     if original_field:
                         try:
                             original_phase_cycle = float(original_field)
                             original_phase_m = original_phase_cycle * wavelength
-                            
+
                             # 重新计算校正后相位，确保与校正量一致
                             corrected_phase_m = original_phase_m + correction_amount
-                            
+
                             # 将校正后的相位值转换为周
                             corrected_phase_cycle = corrected_phase_m / wavelength
-                            
+
                             # 格式化相位观测值（保持原有格式，只保留3位小数）
                             formatted_phase = f"{corrected_phase_cycle:14.3f}"
-                            
+
                             # 更新观测值字段
                             modified_line[start_pos:end_pos] = formatted_phase.rjust(16)
                             output_lines[sat_line_idx] = ''.join(modified_line)
-                            
+
                             # 记录修改详情
                             modification_info = {
                                 'freq': freq,
@@ -2728,7 +2765,7 @@ class GNSSAnalyzer:
                             modification_details[sat_id].append(modification_info)
                             total_modifications += 1
                             modified_satellites.add(sat_id)
-                            
+
                             # 记录详细修改信息到日志（不输出到终端）
                             if not first_epoch_processed:
                                 # 解析具体历元时间
@@ -2738,26 +2775,27 @@ class GNSSAnalyzer:
                                     'debug_info': f"历元 {epoch_timestamp}，卫星 {sat_id}，频率 {freq}\n  原始相位: {original_phase_cycle:.6f} 周 ({original_phase_m:.6f} 米)\n  校正后相位: {corrected_phase_cycle:.6f} 周 ({corrected_phase_m:.6f} 米)\n  校正量: {correction_amount:.6f} 米"
                                 })
                                 first_epoch_processed = True
-                                
+
                         except ValueError:
                             continue  # 跳过无法解析的观测值
-                
+
         # 写入输出文件
         with open(output_path, 'w', encoding='utf-8') as f:
             f.writelines(output_lines)
-            
+
         # 保存修改详情到结果中
         self.results['phase_modification_details'] = {
             'modification_details': modification_details,
             'total_modifications': total_modifications,
             'modified_satellites': list(modified_satellites)
         }
-        
+
         self.update_progress(100)
         print(f"校正后的RINEX文件已生成: {output_path}")
         return output_path
 
-    def _apply_phase_correction_to_line(self, obs_line: str, sat_id: str, epoch: datetime, corrected_freq_data: Dict) -> tuple:
+    def _apply_phase_correction_to_line(self, obs_line: str, sat_id: str, epoch: datetime,
+                                        corrected_freq_data: Dict) -> tuple:
         """对单行观测数据应用相位校正
         
         参数:
@@ -2773,46 +2811,46 @@ class GNSSAnalyzer:
         line = obs_line.rstrip('\n')
         if len(line) < 80:
             return obs_line + "\n", []
-            
+
         # 提取观测值字段（每16字符一个观测值）
         obs_values = []
         for i in range(80, len(line), 16):
-            field = line[i:i+16].strip()
+            field = line[i:i + 16].strip()
             obs_values.append(field if field else None)
-            
+
         corrected_line = line[:80]  # 保持前80字符不变
         modifications = []
-        
+
         # 获取该卫星系统的观测类型信息
         sat_system = sat_id[0] if sat_id else 'Unknown'
-        
+
         # 从RINEX数据中获取观测类型信息
         obs_types = []
         if hasattr(self, 'rinex_data') and self.rinex_data and 'header' in self.rinex_data:
             obs_types = self.rinex_data['header'].get(f'obs_types_{sat_system}', [])
-            
+
         # 调试信息：显示观测类型（只在第一次调用时显示）
         if not hasattr(self, '_debug_shown_obs_types'):
             print(f"    调试信息：卫星系统 {sat_system} 的观测类型: {obs_types}")
             print(f"    调试信息：观测值字段数: {len(obs_values)}")
             self._debug_shown_obs_types = True
-        
+
         # 对于每个频率的校正数据
         for freq, freq_data in corrected_freq_data.items():
             times = freq_data['times']
             corrected_phases = freq_data['corrected_phase']
             wavelengths = freq_data['wavelengths']
-            
+
             # 找到最接近当前历元的时间索引
             closest_idx = 0
             min_time_diff = float('inf')
-            
+
             for idx, t in enumerate(times):
                 time_diff = abs((t - epoch).total_seconds())
                 if time_diff < min_time_diff:
                     min_time_diff = time_diff
                     closest_idx = idx
-                    
+
             # 如果时间差太大（超过0.1秒），跳过校正
             # 使用更小的容差以确保精确匹配
             if min_time_diff > 0.1:
@@ -2820,24 +2858,25 @@ class GNSSAnalyzer:
                 if not hasattr(self, '_debug_time_mismatch_shown'):
                     print(f"    调试信息：时间匹配失败 - 最小时间差: {min_time_diff:.6f}秒")
                     print(f"    调试信息：当前历元: {epoch}")
-                    print(f"    调试信息：可用时间范围: {times[0] if times else 'None'} 到 {times[-1] if times else 'None'}")
+                    print(
+                        f"    调试信息：可用时间范围: {times[0] if times else 'None'} 到 {times[-1] if times else 'None'}")
                     self._debug_time_mismatch_shown = True
                 continue
-                
+
             # 获取波长
             wavelength = wavelengths[closest_idx] if closest_idx < len(wavelengths) else None
-            
+
             if wavelength is not None:
                 # 获取原始相位值
                 original_phase_cycle = None
                 original_phase_m = None
-                
+
                 # 根据观测类型找到对应的相位观测值
                 phase_obs_type = freq  # 频率名称就是观测类型，例如：L1C -> L1C
                 if not hasattr(self, '_debug_shown_phase_parsing'):
                     print(f"      调试信息：查找观测类型 {phase_obs_type}")
                     self._debug_shown_phase_parsing = True
-                
+
                 if phase_obs_type in obs_types:
                     phase_idx = obs_types.index(phase_obs_type)
                     if phase_idx < len(obs_values) and obs_values[phase_idx]:
@@ -2845,7 +2884,8 @@ class GNSSAnalyzer:
                             original_phase_cycle = float(obs_values[phase_idx])
                             original_phase_m = original_phase_cycle * wavelength
                             if not hasattr(self, '_debug_shown_phase_parsing'):
-                                print(f"      调试信息：解析到原始相位值 {original_phase_cycle} 周 ({original_phase_m} 米)")
+                                print(
+                                    f"      调试信息：解析到原始相位值 {original_phase_cycle} 周 ({original_phase_m} 米)")
                                 self._debug_shown_phase_parsing = True
                         except ValueError as e:
                             if not hasattr(self, '_debug_shown_phase_parsing'):
@@ -2855,25 +2895,25 @@ class GNSSAnalyzer:
                     if not hasattr(self, '_debug_shown_phase_parsing'):
                         print(f"      调试信息：未找到观测类型 {phase_obs_type} 在观测类型列表中")
                         self._debug_shown_phase_parsing = True
-                
+
                 # 重新计算校正后相位，确保与校正量一致
                 if original_phase_m is not None:
                     corrected_phase_m = original_phase_m + correction_amount
                     # 将米转换为周
                     corrected_phase_cycle = corrected_phase_m / wavelength
-                
+
                 # 格式化相位观测值（保持原有格式，只保留3位小数）
                 formatted_phase = f"{corrected_phase_cycle:14.3f}"
-                
+
                 # 计算校正量（从ROC模型获取）
                 correction_amount = 0
                 if self.results.get('roc_model'):
                     system_freq_key = f"{sat_system}_{freq}"
-                    
+
                     if system_freq_key in self.results['roc_model']:
                         roc_info = self.results['roc_model'][system_freq_key]
                         roc_rate = roc_info['roc_rate']
-                        
+
                         # 计算校正量：ROC * (t - t0)
                         # 使用与correct_phase_observations相同的逻辑
                         if times:
@@ -2883,7 +2923,7 @@ class GNSSAnalyzer:
                                 if abs((t - epoch).total_seconds()) < 0.1:  # 0.1秒容差
                                     time_idx = idx
                                     break
-                            
+
                             if time_idx is not None and 'correction_applied' in freq_data:
                                 # 直接使用已计算的校正量
                                 correction_amount = freq_data['correction_applied'][time_idx]
@@ -2892,9 +2932,9 @@ class GNSSAnalyzer:
                                 t0 = times[0]
                                 time_diff_seconds = (epoch - t0).total_seconds()
                                 correction_amount = -roc_rate * time_diff_seconds
-                
+
                 # 原始相位值已在上面解析
-                
+
                 # 记录修改详情
                 modification_info = {
                     'freq': freq,
@@ -2908,11 +2948,11 @@ class GNSSAnalyzer:
                     'formatted_phase': formatted_phase
                 }
                 modifications.append(modification_info)
-                
+
                 # 这里需要根据实际的观测类型顺序来确定相位观测值的位置
                 # 简化处理：假设相位观测值在特定位置
                 # 实际应用中需要根据RINEX文件头信息来确定
-                
+
         return corrected_line + "\n", modifications
 
     def perform_code_phase_inconsistency_modeling(self, receiver_rinex_path: str, output_path: str = None) -> Dict:
@@ -2926,48 +2966,48 @@ class GNSSAnalyzer:
             包含所有分析结果的字典
         """
         print("开始码相不一致性建模和校正流程...")
-        
+
         # 确保已读取手机观测数据
         if not self.observations_meters:
             raise ValueError("请先读取手机RINEX观测数据")
-            
+
         # 第一步：读取接收机观测数据
         print("步骤1: 读取接收机RINEX观测数据...")
         self.read_receiver_rinex_obs(receiver_rinex_path)
-        
+
         # 第二步：计算接收机CMC（手机CMC使用现有的伪距相位原始差值）
         print("步骤2: 计算接收机CMC...")
         receiver_cmc = self.calculate_receiver_cmc()
-        
+
         # 第三步：计算站间单差dCMC
         print("步骤3: 计算站间单差dCMC...")
         dcmc = self.calculate_dcmc(receiver_rinex_path)
-        
+
         # 第四步：提取CCI时间序列
         print("步骤4: 提取码相不一致性时间序列...")
         cci_series = self.extract_cci_series(None)  # 不传递路径，使用已计算的结果
-        
+
         # 第五步：计算ROC模型参数
         print("步骤5: 计算ROC模型参数...")
         roc_model = self.calculate_roc_model(None)  # 不传递路径，使用已计算的结果
-        
+
         # 第六步：校正载波相位观测值
         print("步骤6: 校正载波相位观测值...")
         corrected_phase = self.correct_phase_observations(None)  # 不传递路径，使用已计算的结果
-        
+
         # 第七步：生成校正后的RINEX文件
         print("步骤7: 生成校正后的RINEX文件...")
         corrected_rinex_path = self.generate_corrected_rinex_file(receiver_rinex_path, output_path)
-        
+
         # 生成分析报告
         print("生成分析报告...")
         report = self._generate_cci_modeling_report()
-        
+
         # 保存报告和日志到文件（使用手机文件的结果目录）
         phone_file_name = os.path.basename(self.input_file_path)
         phone_file_name_no_ext = os.path.splitext(phone_file_name)[0]
         phone_result_dir = os.path.join("results", phone_file_name_no_ext)
-        
+
         if os.path.exists(phone_result_dir):
             # 创建code-carrier inconsistency子文件夹
             cci_dir = os.path.join(phone_result_dir, "code-carrier inconsistency")
@@ -2977,14 +3017,14 @@ class GNSSAnalyzer:
             with open(report_path, 'w', encoding='utf-8') as f:
                 f.write(report)
             print(f"分析报告已保存: {report_path}")
-            
+
             # 保存处理日志
             log_path = self.save_cci_processing_log(receiver_rinex_path)
             if log_path:
                 print(f"处理日志已保存: {log_path}")
-        
+
         print("码相不一致性建模和校正流程完成!")
-        
+
         return {
             'receiver_cmc': receiver_cmc,
             'phone_cmc': self.results.get('code_phase_differences', {}),  # 使用伪距相位原始差值
@@ -3009,16 +3049,16 @@ class GNSSAnalyzer:
         phone_file_name = os.path.basename(self.input_file_path)
         phone_file_name_no_ext = os.path.splitext(phone_file_name)[0]
         phone_result_dir = os.path.join("results", phone_file_name_no_ext)
-        
+
         if not os.path.exists(phone_result_dir):
             return None
-            
+
         # 保存日志文件到code-carrier inconsistency子文件夹
         cci_dir = os.path.join(phone_result_dir, "code-carrier inconsistency")
         if not os.path.exists(cci_dir):
             os.makedirs(cci_dir)
         log_path = os.path.join(cci_dir, "code_phase_inconsistency_processing.log")
-        
+
         # 初始化日志内容
         log_content = [
             "=" * 70 + "\n",
@@ -3028,28 +3068,28 @@ class GNSSAnalyzer:
             f"手机RINEX文件: {self.input_file_path}\n",
             f"接收机RINEX文件: {receiver_rinex_path}\n\n"
         ]
-        
+
         # 载波相位修改详情
         modification_details = self.results.get('phase_modification_details', {})
         if modification_details:
             total_modifications = modification_details.get('total_modifications', 0)
             modified_satellites = modification_details.get('modified_satellites', [])
             sat_details = modification_details.get('modification_details', {})
-            
+
             log_content.append(f"载波相位校正统计:\n")
             log_content.append(f"- 总计修改 {total_modifications} 个载波相位观测值\n")
             log_content.append(f"- 涉及 {len(modified_satellites)} 颗卫星\n")
             log_content.append(f"- 修改的卫星: {', '.join(modified_satellites)}\n\n")
-            
+
             # 详细修改信息
             log_content.append("各卫星载波相位修改详情:\n")
             log_content.append("-" * 50 + "\n")
-            
+
             for sat_id in modified_satellites:
                 if sat_id in sat_details:
                     details = sat_details[sat_id]
                     log_content.append(f"卫星 {sat_id}:\n")
-                    
+
                     # 先添加调试信息（如果存在）
                     debug_info_added = False
                     for detail in details:
@@ -3057,36 +3097,36 @@ class GNSSAnalyzer:
                             log_content.append(f"  {detail['debug_info']}\n")
                             debug_info_added = True
                             break
-                    
+
                     # 按历元分组
                     epoch_groups = defaultdict(list)
                     for detail in details:
                         if 'epoch' in detail:  # 只处理有epoch字段的详情
                             epoch_groups[detail['epoch']].append(detail)
-                    
+
                     for epoch in sorted(epoch_groups.keys()):
                         epoch_details = epoch_groups[epoch]
                         log_content.append(f"  历元 {epoch}:\n")
-                        
+
                         for detail in epoch_details:
                             # 获取原始相位值
                             original_phase_m = detail.get('original_phase_m')
                             original_phase_cycle = detail.get('original_phase_cycle')
-                            
+
                             if original_phase_m is not None:
                                 log_content.append(f"    - {detail['freq']}: "
-                                                 f"原始相位={original_phase_m:.6f}m ({original_phase_cycle:.6f}周), "
-                                                 f"校正后相位={detail['corrected_phase_m']:.6f}m ({detail['corrected_phase_cycle']:.6f}周), "
-                                                 f"校正量={detail['correction_amount']:.6f}m, "
-                                                 f"波长={detail['wavelength']:.4f}m\n")
+                                                   f"原始相位={original_phase_m:.6f}m ({original_phase_cycle:.6f}周), "
+                                                   f"校正后相位={detail['corrected_phase_m']:.6f}m ({detail['corrected_phase_cycle']:.6f}周), "
+                                                   f"校正量={detail['correction_amount']:.6f}m, "
+                                                   f"波长={detail['wavelength']:.4f}m\n")
                             else:
                                 log_content.append(f"    - {detail['freq']}: "
-                                                 f"原始相位=无法解析, "
-                                                 f"校正后相位={detail['corrected_phase_m']:.6f}m ({detail['corrected_phase_cycle']:.6f}周), "
-                                                 f"校正量={detail['correction_amount']:.6f}m, "
-                                                 f"波长={detail['wavelength']:.4f}m\n")
+                                                   f"原始相位=无法解析, "
+                                                   f"校正后相位={detail['corrected_phase_m']:.6f}m ({detail['corrected_phase_cycle']:.6f}周), "
+                                                   f"校正量={detail['correction_amount']:.6f}m, "
+                                                   f"波长={detail['wavelength']:.4f}m\n")
                     log_content.append("\n")
-        
+
         # ROC模型参数
         if self.results.get('roc_model'):
             log_content.append("ROC模型参数（按卫星系统分别计算）:\n")
@@ -3097,7 +3137,8 @@ class GNSSAnalyzer:
                 if len(parts) == 2:
                     sat_system = parts[0]
                     freq = parts[1]
-                    system_name = {'G': 'GPS', 'R': 'GLONASS', 'E': 'Galileo', 'C': 'BDS', 'J': 'QZSS', 'I': 'IRNSS'}.get(sat_system, sat_system)
+                    system_name = {'G': 'GPS', 'R': 'GLONASS', 'E': 'Galileo', 'C': 'BDS', 'J': 'QZSS',
+                                   'I': 'IRNSS'}.get(sat_system, sat_system)
                     log_content.append(f"{system_name} 系统 频率 {freq}:\n")
                 else:
                     log_content.append(f"系统-频率 {system_freq_key}:\n")
@@ -3105,7 +3146,7 @@ class GNSSAnalyzer:
                 log_content.append(f"  标准差: {roc_info['roc_std']:.6e} m/s\n")
                 log_content.append(f"  参与卫星数: {roc_info['num_satellites']}\n")
                 log_content.append(f"  参与卫星: {', '.join(roc_info['contributing_sats'])}\n\n")
-    
+
         # dCMC统计信息
         if self.results.get('dcmc'):
             log_content.append("dCMC统计信息:\n")
@@ -3113,37 +3154,37 @@ class GNSSAnalyzer:
             dcmc_data = self.results['dcmc']
             total_combinations = 0
             total_points = 0
-            
+
             for sat_id, freq_data in dcmc_data.items():
                 for freq, dcmc_info in freq_data.items():
                     total_combinations += 1
                     total_points += len(dcmc_info['dcmc'])
-                    
+
             log_content.append(f"卫星-频率组合数: {total_combinations}\n")
             log_content.append(f"总观测点数: {total_points}\n\n")
-            
+
         # CCI分析结果
         if self.results.get('cci_series'):
             log_content.append("CCI时间序列分析:\n")
             log_content.append("-" * 40 + "\n")
             cci_data = self.results['cci_series']
-            
+
             for sat_id, freq_data in cci_data.items():
                 log_content.append(f"卫星 {sat_id}:\n")
                 for freq, cci_info in freq_data.items():
                     arc_info = cci_info['arc_info']
                     log_content.append(f"  频率 {freq}: {len(arc_info)} 个连续弧段\n")
                     for arc in arc_info:
-                        log_content.append(f"    弧段 {arc['arc_index']+1}: 时长 {arc['duration']:.1f}s, "
-                                          f"点数 {arc['num_points']}, CCI范围 {arc['cci_range']:.4f}m\n")
+                        log_content.append(f"    弧段 {arc['arc_index'] + 1}: 时长 {arc['duration']:.1f}s, "
+                                           f"点数 {arc['num_points']}, CCI范围 {arc['cci_range']:.4f}m\n")
                 log_content.append("\n")
-            
+
         # 校正效果统计
         if self.results.get('corrected_phase'):
             log_content.append("校正效果统计:\n")
             log_content.append("-" * 40 + "\n")
             corrected_data = self.results['corrected_phase']
-            
+
             for sat_id, freq_data in corrected_data.items():
                 log_content.append(f"卫星 {sat_id}:\n")
                 for freq, freq_data in freq_data.items():
@@ -3153,17 +3194,17 @@ class GNSSAnalyzer:
                         min_corr = min(corrections)
                         mean_corr = sum(corrections) / len(corrections)
                         log_content.append(f"  频率 {freq}: 校正范围 [{min_corr:.4f}, {max_corr:.4f}]m, "
-                                          f"平均校正 {mean_corr:.4f}m\n")
+                                           f"平均校正 {mean_corr:.4f}m\n")
                 log_content.append("\n")
-        
+
         log_content.append("=" * 70 + "\n")
         log_content.append("处理完成\n")
         log_content.append("=" * 70 + "\n")
-        
+
         # 写入日志文件
         with open(log_path, 'w', encoding='utf-8') as f:
             f.writelines(log_content)
-            
+
         return log_path
 
     def remove_code_phase_outliers(self, data: Dict, threshold: float = 5.0) -> str:
@@ -3238,18 +3279,18 @@ class GNSSAnalyzer:
         phone_file_name = os.path.basename(self.input_file_path)
         phone_file_name_no_ext = os.path.splitext(phone_file_name)[0]
         phone_result_dir = os.path.join("results", phone_file_name_no_ext)
-        
+
         # 检查是否存在CCI处理后的文件
         cci_dir = os.path.join(phone_result_dir, "code-carrier inconsistency")
         cci_file_name = f"{phone_file_name_no_ext}-cc inconsistency.25o"
         cci_file_path = os.path.join(cci_dir, cci_file_name)
-        
+
         if os.path.exists(cci_file_path):
             input_file_path = cci_file_path
             log_content.append(f"使用CCI处理后的文件: {cci_file_name}\n")
         else:
             log_content.append(f"使用原始文件: {phone_file_name}\n")
-        
+
         with open(input_file_path, 'r', encoding='utf-8') as f:
             lines = f.readlines()
 
@@ -3378,12 +3419,12 @@ class GNSSAnalyzer:
         phone_file_name = os.path.basename(self.input_file_path)
         phone_file_name_no_ext = os.path.splitext(phone_file_name)[0]
         phone_result_dir = os.path.join("results", phone_file_name_no_ext)
-        
+
         # 创建Coarse error子文件夹
         coarse_error_dir = os.path.join(phone_result_dir, "Coarse error")
         if not os.path.exists(coarse_error_dir):
             os.makedirs(coarse_error_dir)
-        
+
         # 使用CCI处理后的文件名作为基础
         cci_file_name = f"{phone_file_name_no_ext}-cc inconsistency.25o"
         cleaned_file_name = f"cleaned1-{cci_file_name}"
@@ -3493,7 +3534,7 @@ class GNSSAnalyzer:
                     'predicted_phase': [],  # 周
                     'prediction_error': [],  # 米
                     'doppler_mps': [],  # 多普勒速度（米/秒）
-                    'doppler_hz': []   # 多普勒频率（Hz）
+                    'doppler_hz': []  # 多普勒频率（Hz）
                 }
 
                 # 计算预测误差
@@ -3506,25 +3547,24 @@ class GNSSAnalyzer:
                             phase_values[i] is not None and
                             frequency is not None and
                             wavelength is not None):
-                        
                         time_diff = (times[i] - times[i - 1]).total_seconds()
-                        
+
                         # 获取当前历元和前一历元的多普勒频率（Hz）
                         # 将存储的多普勒速度（米/秒）转换回多普勒频率（Hz）
-                        doppler_now_hz = doppler_values[i] / wavelength      # 当前历元多普勒频率
+                        doppler_now_hz = doppler_values[i] / wavelength  # 当前历元多普勒频率
                         doppler_old_hz = doppler_values[i - 1] / wavelength  # 前一历元多普勒频率
-                        
+
                         # 使用新公式：φˆrs,j(k + 1) = φrs,j(k) + (Drs,j(k+1)+Drs,j(k))/2 * T
                         # 其中 Drs,j(k+1) 和 Drs,j(k) 是多普勒频率（Hz），T 是时间差（秒）
                         # (Drs,j(k+1)+Drs,j(k))/2 是多普勒频率的算术平均值
                         doppler_arithmetic_mean = (doppler_now_hz + doppler_old_hz) / 2
-                        
+
                         # 预测相位（周）
                         # 注意：多普勒频率与相位变化率的关系是 dΦ/dt = -f_d / f_c
                         # 所以相位变化量 = -dt * f_d / f_c
                         phase_change = -time_diff * doppler_arithmetic_mean / frequency
                         predicted_phase = phase_values[i - 1] + phase_change  # 周
-                        
+
                         # 计算预测误差（米）
                         # ˆΦs r,j − Φrs,j = λj (ˆφrs,j − φrs,j)
                         error = (phase_values[i] - predicted_phase) * wavelength  # 周 * 米/周 = 米
@@ -3534,8 +3574,9 @@ class GNSSAnalyzer:
                         freq_errors[freq]['actual_phase'].append(phase_values[i])
                         freq_errors[freq]['predicted_phase'].append(predicted_phase)
                         freq_errors[freq]['prediction_error'].append(error)
-                        freq_errors[freq]['doppler_mps'].append((doppler_values[i - 1] + doppler_values[i]) / 2)  # 保存速度值（算术平均）
-                        freq_errors[freq]['doppler_hz'].append(doppler_arithmetic_mean)    # 保存频率值（算术平均）
+                        freq_errors[freq]['doppler_mps'].append(
+                            (doppler_values[i - 1] + doppler_values[i]) / 2)  # 保存速度值（算术平均）
+                        freq_errors[freq]['doppler_hz'].append(doppler_arithmetic_mean)  # 保存频率值（算术平均）
 
                 errors[sat_id] = freq_errors
                 processed_sats += 1
@@ -3637,19 +3678,19 @@ class GNSSAnalyzer:
     def prepare_isb_data(self, receiver_rinex_path: str = None) -> Dict:
         """准备ISB计算所需的数据：时间戳对齐、BDS卫星识别和分类"""
         self.start_stage(6, "准备ISB计算数据", 100)
-        
+
         # 检查是否有接收机数据
         if not receiver_rinex_path or not os.path.exists(receiver_rinex_path):
             raise ValueError("需要提供接收机RINEX文件路径")
-        
+
         # 读取接收机数据
         receiver_data = self.read_receiver_rinex_obs(receiver_rinex_path)
         self.update_progress(20)
-        
+
         # 获取手机和接收机的时间戳
         phone_times = set()
         receiver_times = set()
-        
+
         # 收集手机时间戳（只使用L2I频率）
         print("正在收集手机BDS卫星L2I频率时间戳...")
         phone_bds_count = 0
@@ -3662,10 +3703,10 @@ class GNSSAnalyzer:
                     print(f"  手机卫星 {sat_id} L2I: {len(times)} 个时间戳")
                 else:
                     print(f"  手机卫星 {sat_id}: 无L2I频率数据")
-        
+
         print(f"手机BDS卫星总数: {phone_bds_count}")
         print(f"手机L2I时间戳总数: {len(phone_times)}")
-        
+
         # 收集接收机时间戳（只使用L2I频率）
         print("正在收集接收机BDS卫星L2I频率时间戳...")
         receiver_bds_count = 0
@@ -3678,30 +3719,30 @@ class GNSSAnalyzer:
                     print(f"  接收机卫星 {sat_id} L2I: {len(times)} 个时间戳")
                 else:
                     print(f"  接收机卫星 {sat_id}: 无L2I频率数据")
-        
+
         print(f"接收机BDS卫星总数: {receiver_bds_count}")
         print(f"接收机L2I时间戳总数: {len(receiver_times)}")
-        
+
         # 显示时间戳范围
         if phone_times:
             phone_times_sorted = sorted(phone_times)
             print(f"手机时间戳范围: {phone_times_sorted[0]} 到 {phone_times_sorted[-1]}")
         else:
             print("手机无L2I时间戳数据")
-            
+
         if receiver_times:
             receiver_times_sorted = sorted(receiver_times)
             print(f"接收机时间戳范围: {receiver_times_sorted[0]} 到 {receiver_times_sorted[-1]}")
         else:
             print("接收机无L2I时间戳数据")
-        
+
         self.update_progress(30)
-        
+
         # 找到共同时间戳（允许小的时间差）
         print("开始时间戳匹配...")
         common_times = []
         time_tolerance = 0.1  # 0.1秒容差，参照码相不一致处理
-        
+
         match_count = 0
         for phone_time in phone_times:
             for receiver_time in receiver_times:
@@ -3710,9 +3751,9 @@ class GNSSAnalyzer:
                     common_times.append(phone_time)
                     match_count += 1
                     break
-        
+
         print(f"时间戳匹配结果: 找到 {len(common_times)} 个共同时间戳")
-        
+
         if not common_times:
             print("错误详情:")
             print(f"  手机L2I时间戳数量: {len(phone_times)}")
@@ -3722,19 +3763,19 @@ class GNSSAnalyzer:
                 # 显示一些示例时间戳用于调试
                 print("  手机时间戳示例:")
                 for i, t in enumerate(sorted(phone_times)[:3]):
-                    print(f"    {i+1}: {t}")
+                    print(f"    {i + 1}: {t}")
                 print("  接收机时间戳示例:")
                 for i, t in enumerate(sorted(receiver_times)[:3]):
-                    print(f"    {i+1}: {t}")
+                    print(f"    {i + 1}: {t}")
             raise ValueError("手机和接收机数据没有共同的时间戳")
-        
+
         common_times = sorted(common_times)
         self.update_progress(40)
-        
+
         # 识别和分类BDS卫星
         bds2_sats = []
         bds3_sats = []
-        
+
         for sat_id in self.observations_meters.keys():
             if sat_id.startswith('C'):
                 prn = sat_id[1:]
@@ -3743,43 +3784,43 @@ class GNSSAnalyzer:
                     bds2_sats.append(sat_id)
                 elif 19 <= prn_num <= 60:  # BDS-3: C19-C60
                     bds3_sats.append(sat_id)
-        
+
         self.update_progress(50)
-        
+
         # 筛选在共同时间段内稳定跟踪的卫星（使用动态检查）
         stable_bds2_sats = []
         stable_bds3_sats = []
-        
+
         print(f"开始筛选稳定卫星...")
-        
+
         # 检查BDS-2卫星（使用更宽松的标准）
         for sat_id in bds2_sats:
             if self._is_satellite_basic_stable(sat_id, common_times, 'phone'):
                 stable_bds2_sats.append(sat_id)
-        
+
         # 检查BDS-3卫星（使用更宽松的标准）
         for sat_id in bds3_sats:
             if self._is_satellite_basic_stable(sat_id, common_times, 'phone'):
                 stable_bds3_sats.append(sat_id)
-        
+
         print(f"手机稳定卫星: BDS-2={len(stable_bds2_sats)}, BDS-3={len(stable_bds3_sats)}")
-        
+
         self.update_progress(70)
-        
+
         # 检查接收机数据中的对应卫星（使用更宽松的标准）
         receiver_stable_bds2 = []
         receiver_stable_bds3 = []
-        
+
         for sat_id in stable_bds2_sats:
             if self._is_satellite_basic_stable(sat_id, common_times, 'receiver', self.receiver_observations):
                 receiver_stable_bds2.append(sat_id)
-        
+
         for sat_id in stable_bds3_sats:
             if self._is_satellite_basic_stable(sat_id, common_times, 'receiver', self.receiver_observations):
                 receiver_stable_bds3.append(sat_id)
-        
+
         self.update_progress(90)
-        
+
         # 返回准备结果
         isb_data = {
             'common_times': common_times,
@@ -3789,57 +3830,58 @@ class GNSSAnalyzer:
             'receiver_data': self.receiver_observations,
             'time_tolerance': time_tolerance
         }
-        
+
         self.update_progress(100)
         return isb_data
-    
-    def _is_satellite_stable(self, sat_id: str, common_times: list, data_source: str, receiver_data: Dict = None) -> bool:
+
+    def _is_satellite_stable(self, sat_id: str, common_times: list, data_source: str,
+                             receiver_data: Dict = None) -> bool:
         """检查卫星在指定时间段内是否稳定跟踪"""
         min_coverage = 0.8  # 最小覆盖率80%
         min_snr = 20.0  # 使用动态阈值，适应实际数据
-        
+
         if data_source == 'phone':
             data = self.observations_meters
         else:
             data = receiver_data
-        
+
         if sat_id not in data:
             return False
-        
+
         # 检查L2I频率（北斗主要频率）
         if 'L2I' not in data[sat_id]:
             return False
-        
+
         freq_data = data[sat_id]['L2I']
         times = freq_data['times']
         snr_values = freq_data.get('snr', [])
-        
+
         # 计算在共同时间段内的覆盖率
         covered_times = 0
         valid_observations = 0
-        
+
         for common_time in common_times:
             # 找到最接近的时间戳
             closest_time = None
             min_diff = float('inf')
-            
+
             for i, time in enumerate(times):
                 diff = abs((time - common_time).total_seconds())
                 if diff < min_diff:
                     min_diff = diff
                     closest_time = time
                     closest_idx = i
-            
+
             if min_diff <= 0.1:  # 0.1秒容差
                 covered_times += 1
                 # 检查信噪比
                 if closest_idx < len(snr_values) and snr_values[closest_idx] is not None:
                     if snr_values[closest_idx] >= min_snr:
                         valid_observations += 1
-        
+
         coverage = covered_times / len(common_times) if common_times else 0
         valid_ratio = valid_observations / covered_times if covered_times > 0 else 0
-        
+
         return coverage >= min_coverage and valid_ratio >= 0.7
 
     def select_reference_satellite(self, isb_data: Dict) -> str:
@@ -3848,118 +3890,118 @@ class GNSSAnalyzer:
         common_times = isb_data['common_times']
         phone_data = isb_data['phone_data']
         receiver_data = isb_data['receiver_data']
-        
+
         if not bds2_sats:
             raise ValueError("没有可用的BDS-2卫星作为基准")
-        
+
         print("开始动态分析所有BDS-2卫星质量...")
-        
+
         # 分析所有BDS2卫星的质量指标
         satellite_quality = {}
-        
+
         for sat_id in bds2_sats:
             if sat_id not in phone_data or 'L2I' not in phone_data[sat_id]:
                 print(f"  卫星 {sat_id}: 无手机L2I数据")
                 continue
-                
+
             if sat_id not in receiver_data or 'L2I' not in receiver_data[sat_id]:
                 print(f"  卫星 {sat_id}: 无接收机L2I数据")
                 continue
-            
+
             # 分析手机数据质量
             phone_freq_data = phone_data[sat_id]['L2I']
             phone_times = phone_freq_data['times']
             phone_snr = phone_freq_data.get('snr', [])
             phone_code = phone_freq_data.get('code', [])
-            
+
             # 分析接收机数据质量
             receiver_freq_data = receiver_data[sat_id]['L2I']
             receiver_times = receiver_freq_data['times']
             receiver_snr = receiver_freq_data.get('snr', [])
             receiver_code = receiver_freq_data.get('code', [])
-            
+
             # 计算质量指标
             quality_metrics = self._analyze_satellite_quality(
                 sat_id, phone_times, phone_snr, phone_code,
                 receiver_times, receiver_snr, receiver_code, common_times
             )
-            
+
             if quality_metrics:
                 satellite_quality[sat_id] = quality_metrics
                 print(f"  卫星 {sat_id}: 平均SNR={quality_metrics['avg_snr']:.1f}dB, "
                       f"覆盖率={quality_metrics['coverage_ratio']:.2f}, "
                       f"稳定性={quality_metrics['stability_score']:.3f}")
-        
+
         if not satellite_quality:
             raise ValueError("没有找到满足基本质量要求的BDS-2卫星")
-        
+
         # 选择质量最好的卫星作为基准
-        best_sat = max(satellite_quality.keys(), 
-                      key=lambda sat: satellite_quality[sat]['overall_score'])
-        
+        best_sat = max(satellite_quality.keys(),
+                       key=lambda sat: satellite_quality[sat]['overall_score'])
+
         best_metrics = satellite_quality[best_sat]
-        
+
         print(f"\n动态基准卫星选择结果:")
         print(f"  选择卫星: {best_sat}")
         print(f"  平均SNR: {best_metrics['avg_snr']:.1f} dB")
         print(f"  覆盖率: {best_metrics['coverage_ratio']:.2f}")
         print(f"  稳定性评分: {best_metrics['stability_score']:.3f}")
         print(f"  综合评分: {best_metrics['overall_score']:.3f}")
-        
+
         return best_sat
-    
+
     def _analyze_satellite_quality(self, sat_id: str, phone_times: list, phone_snr: list, phone_code: list,
-                                 receiver_times: list, receiver_snr: list, receiver_code: list, 
-                                 common_times: list) -> Dict:
+                                   receiver_times: list, receiver_snr: list, receiver_code: list,
+                                   common_times: list) -> Dict:
         """分析单个卫星的质量指标"""
         # 计算手机数据质量
         phone_valid_snr = [snr for snr in phone_snr if snr is not None and snr > 0]
         phone_valid_code = [code for code in phone_code if code is not None]
-        
+
         if not phone_valid_snr or not phone_valid_code:
             return None
-        
+
         phone_avg_snr = np.mean(phone_valid_snr)
         phone_snr_std = np.std(phone_valid_snr)
         phone_code_std = np.std(phone_valid_code)
-        
+
         # 计算接收机数据质量
         receiver_valid_snr = [snr for snr in receiver_snr if snr is not None and snr > 0]
         receiver_valid_code = [code for code in receiver_code if code is not None]
-        
+
         if not receiver_valid_snr or not receiver_valid_code:
             return None
-        
+
         receiver_avg_snr = np.mean(receiver_valid_snr)
         receiver_snr_std = np.std(receiver_valid_snr)
         receiver_code_std = np.std(receiver_valid_code)
-        
+
         # 计算共同时间段内的覆盖率
         phone_coverage = self._calculate_coverage(phone_times, common_times)
         receiver_coverage = self._calculate_coverage(receiver_times, common_times)
-        
+
         # 检查覆盖率是否为None
         if phone_coverage is None or receiver_coverage is None:
             return None
-        
+
         # 使用手机和接收机数据的平均值
         avg_snr = (phone_avg_snr + receiver_avg_snr) / 2
         coverage_ratio = (phone_coverage + receiver_coverage) / 2
-        
+
         # 计算稳定性评分（信噪比稳定性 + 观测值稳定性）
         # 添加防护性检查，确保std值不为None
         phone_snr_std = phone_snr_std if phone_snr_std is not None else 0.0
         receiver_snr_std = receiver_snr_std if receiver_snr_std is not None else 0.0
         phone_code_std = phone_code_std if phone_code_std is not None else 0.0
         receiver_code_std = receiver_code_std if receiver_code_std is not None else 0.0
-        
+
         snr_stability = 1.0 / (1.0 + (phone_snr_std + receiver_snr_std) / 2 / 10.0)
         code_stability = 1.0 / (1.0 + (phone_code_std + receiver_code_std) / 2 / 1000.0)
         stability_score = (snr_stability + code_stability) / 2
-        
+
         # 综合评分：信噪比权重50%，覆盖率权重30%，稳定性权重20%
         overall_score = (avg_snr / 50.0) * 0.5 + coverage_ratio * 0.3 + stability_score * 0.2
-        
+
         return {
             'avg_snr': avg_snr,
             'coverage_ratio': coverage_ratio,
@@ -3970,66 +4012,67 @@ class GNSSAnalyzer:
             'phone_coverage': phone_coverage,
             'receiver_coverage': receiver_coverage
         }
-    
+
     def _calculate_coverage(self, times: list, common_times: list) -> float:
         """计算在共同时间段内的覆盖率"""
         if not times or not common_times:
             return 0.0
-        
+
         coverage = 0
         for common_time in common_times:
             for time in times:
                 if abs((time - common_time).total_seconds()) <= 0.1:
                     coverage += 1
                     break
-        
+
         return coverage / len(common_times) if common_times else 0.0
 
-    def _is_satellite_basic_stable(self, sat_id: str, common_times: list, data_source: str, receiver_data: Dict = None) -> bool:
+    def _is_satellite_basic_stable(self, sat_id: str, common_times: list, data_source: str,
+                                   receiver_data: Dict = None) -> bool:
         """基本稳定性检查：使用严格的标准，确保只有高质量卫星用于ISB分析"""
         min_coverage = 0.8  # 最小覆盖率80%（更严格）
         min_snr = 25.0  # 最小信噪比25dB（更严格）
         min_valid_ratio = 0.7  # 最小有效观测比例70%（更严格）
-        
+
         if data_source == 'phone':
             data = self.observations_meters
         else:
             data = receiver_data
-        
+
         if sat_id not in data:
             return False
-        
+
         # 检查L2I频率（北斗主要频率）
         if 'L2I' not in data[sat_id]:
             return False
-        
+
         freq_data = data[sat_id]['L2I']
         times = freq_data['times']
         snr_values = freq_data.get('snr', [])
         code_values = freq_data.get('code', [])
-        
+
         # 检查是否有基本的观测数据
         if not times or not code_values:
             return False
-        
+
         # 计算在共同时间段内的覆盖率
         covered_times = 0
         valid_observations = 0
         snr_sum = 0
         snr_count = 0
-        
+
         for common_time in common_times:
             # 找到最接近的时间戳
             closest_time = None
             min_diff = float('inf')
-            
+
             for i, time in enumerate(times):
                 diff = abs((time - common_time).total_seconds())
                 if diff < min_diff:
                     min_diff = diff
                     closest_time = time
                     closest_idx = i
-            
+
             if min_diff <= 0.1:  # 0.1秒容差
                 covered_times += 1
                 # 检查信噪比
@@ -4039,16 +4082,16 @@ class GNSSAnalyzer:
                     snr_count += 1
                     if snr_val >= min_snr:
                         valid_observations += 1
-        
+
         coverage = covered_times / len(common_times) if common_times else 0
         valid_ratio = valid_observations / covered_times if covered_times > 0 else 0
         avg_snr = snr_sum / snr_count if snr_count > 0 else 0
-        
+
         # 更严格的稳定性标准
         is_stable = coverage >= min_coverage and valid_ratio >= min_valid_ratio and avg_snr >= min_snr
-        
+
         # 简化输出，只显示总结信息
-        
+
         return is_stable
 
     def filter_stable_satellites(self, isb_data: Dict) -> Dict:
@@ -4058,59 +4101,60 @@ class GNSSAnalyzer:
         common_times = isb_data['common_times']
         phone_data = isb_data['phone_data']
         receiver_data = isb_data['receiver_data']
-        
+
         print("开始动态筛选稳定卫星...")
-        
+
         # 动态筛选BDS-2卫星
         stable_bds2 = []
         for sat_id in bds2_sats:
             if self._is_satellite_dynamically_stable(sat_id, common_times, phone_data, receiver_data):
                 stable_bds2.append(sat_id)
-        
+
         # 动态筛选BDS-3卫星
         stable_bds3 = []
         for sat_id in bds3_sats:
             if self._is_satellite_dynamically_stable(sat_id, common_times, phone_data, receiver_data):
                 stable_bds3.append(sat_id)
-        
+
         print(f"\n动态筛选结果:")
         print(f"  稳定BDS-2卫星数量: {len(stable_bds2)}")
         print(f"  稳定BDS-3卫星数量: {len(stable_bds3)}")
-        
+
         return {
             'stable_bds2': stable_bds2,
             'stable_bds3': stable_bds3
         }
-    
-    def _is_satellite_dynamically_stable(self, sat_id: str, common_times: list, phone_data: Dict, receiver_data: Dict) -> bool:
+
+    def _is_satellite_dynamically_stable(self, sat_id: str, common_times: list, phone_data: Dict,
+                                         receiver_data: Dict) -> bool:
         """动态检查卫星稳定性：基于实际数据质量而非固定阈值"""
         # 基本数据存在性检查
         if sat_id not in phone_data or 'L2I' not in phone_data[sat_id]:
             return False
-        
+
         if sat_id not in receiver_data or 'L2I' not in receiver_data[sat_id]:
             return False
-        
+
         phone_freq_data = phone_data[sat_id]['L2I']
         receiver_freq_data = receiver_data[sat_id]['L2I']
-        
+
         phone_times = phone_freq_data['times']
         phone_snr = phone_freq_data.get('snr', [])
         phone_code = phone_freq_data.get('code', [])
-        
+
         receiver_times = receiver_freq_data['times']
         receiver_snr = receiver_freq_data.get('snr', [])
         receiver_code = receiver_freq_data.get('code', [])
-        
+
         # 计算质量指标
         quality_metrics = self._analyze_satellite_quality(
             sat_id, phone_times, phone_snr, phone_code,
             receiver_times, receiver_snr, receiver_code, common_times
         )
-        
+
         if not quality_metrics:
             return False
-        
+
         # 更严格的动态稳定性标准：
         # 1. 覆盖率 >= 85%（更严格）
         # 2. 平均信噪比 >= 30dB（更严格）
@@ -4118,117 +4162,120 @@ class GNSSAnalyzer:
         # 4. 综合评分 >= 0.7（新增要求）
         min_coverage = 0.85
         min_avg_snr = 30.0  # 更严格的信噪比要求
-        min_stability = 0.4 # 更严格的稳定性要求
+        min_stability = 0.4  # 更严格的稳定性要求
         min_overall_score = 0.7  # 综合评分要求
-        
+
         is_stable = (quality_metrics['coverage_ratio'] >= min_coverage and
-                    quality_metrics['avg_snr'] >= min_avg_snr and
-                    quality_metrics['stability_score'] >= min_stability and
-                    quality_metrics['overall_score'] >= min_overall_score)
-        
+                     quality_metrics['avg_snr'] >= min_avg_snr and
+                     quality_metrics['stability_score'] >= min_stability and
+                     quality_metrics['overall_score'] >= min_overall_score)
+
         # 简化输出，只显示总结信息
-        
+
         return is_stable
-    
-    def _is_satellite_highly_stable(self, sat_id: str, common_times: list, phone_data: Dict, receiver_data: Dict) -> bool:
+
+    def _is_satellite_highly_stable(self, sat_id: str, common_times: list, phone_data: Dict,
+                                    receiver_data: Dict) -> bool:
         """检查卫星是否高度稳定（更严格的标准）"""
         min_coverage = 0.9  # 最小覆盖率90%
         min_snr = 25.0  # 使用动态阈值，适应实际数据
         max_gap_seconds = 60  # 最大连续缺失时间60秒
-        
+
         # 检查手机数据
         if sat_id not in phone_data or 'L2I' not in phone_data[sat_id]:
             return False
-        
+
         phone_freq_data = phone_data[sat_id]['L2I']
         phone_times = phone_freq_data['times']
         phone_snr = phone_freq_data.get('snr', [])
-        
+
         # 检查接收机数据
         if sat_id not in receiver_data or 'L2I' not in receiver_data[sat_id]:
             return False
-        
+
         receiver_freq_data = receiver_data[sat_id]['L2I']
         receiver_times = receiver_freq_data['times']
         receiver_snr = receiver_freq_data.get('snr', [])
-        
+
         # 检查手机数据稳定性
         phone_stable = self._check_data_stability(phone_times, phone_snr, common_times, min_snr, max_gap_seconds)
-        
+
         # 检查接收机数据稳定性
-        receiver_stable = self._check_data_stability(receiver_times, receiver_snr, common_times, min_snr, max_gap_seconds)
-        
+        receiver_stable = self._check_data_stability(receiver_times, receiver_snr, common_times, min_snr,
+                                                     max_gap_seconds)
+
         return phone_stable and receiver_stable
-    
-    def _check_data_stability(self, times: list, snr_values: list, common_times: list, min_snr: float, max_gap_seconds: float) -> bool:
+
+    def _check_data_stability(self, times: list, snr_values: list, common_times: list, min_snr: float,
+                              max_gap_seconds: float) -> bool:
         """检查数据稳定性"""
         # 计算覆盖率
         covered_times = 0
         valid_observations = 0
-        
+
         for common_time in common_times:
             closest_time = None
             min_diff = float('inf')
             closest_idx = -1
-            
+
             for i, time in enumerate(times):
                 diff = abs((time - common_time).total_seconds())
                 if diff < min_diff:
                     min_diff = diff
                     closest_time = time
                     closest_idx = i
-            
+
             if min_diff <= 0.1:  # 0.1秒容差
                 covered_times += 1
                 if closest_idx < len(snr_values) and snr_values[closest_idx] is not None:
                     if snr_values[closest_idx] >= min_snr:
                         valid_observations += 1
-        
+
         coverage = covered_times / len(common_times) if common_times else 0
         valid_ratio = valid_observations / covered_times if covered_times > 0 else 0
-        
+
         # 检查最大连续缺失时间
         max_gap = 0
         current_gap = 0
-        
+
         for i in range(len(common_times) - 1):
             current_time = common_times[i]
             next_time = common_times[i + 1]
-            
+
             # 检查当前时间是否有观测
             has_obs = False
             for time in times:
                 if abs((time - current_time).total_seconds()) <= 0.1:
                     has_obs = True
                     break
-            
+
             if has_obs:
                 current_gap = 0
             else:
                 current_gap += (next_time - current_time).total_seconds()
                 max_gap = max(max_gap, current_gap)
-        
+
         return coverage >= 0.9 and valid_ratio >= 0.8 and max_gap <= max_gap_seconds
 
     def calculate_isb_double_difference(self, isb_data: Dict, reference_sat: str, stable_sats: Dict) -> Dict:
         """计算ISB：使用双差法"""
         self.start_stage(7, "计算ISB双差", 100)
-        
+
         common_times = isb_data['common_times']
         phone_data = isb_data['phone_data']
         receiver_data = isb_data['receiver_data']
-        
+
         stable_bds2 = stable_sats['stable_bds2']
         stable_bds3 = stable_sats['stable_bds3']
-        
+
         # 确保基准卫星在稳定卫星列表中
         if reference_sat not in stable_bds2:
             stable_bds2.append(reference_sat)
-        
+
         print(f"基准卫星: {reference_sat}")
         print(f"稳定BDS-2卫星: {stable_bds2}")
         print(f"稳定BDS-3卫星: {stable_bds3}")
-        
+
         # 存储结果
         isb_results = {
             'reference_satellite': reference_sat,
@@ -4240,62 +4287,62 @@ class GNSSAnalyzer:
             'isb_std': 0.0,
             'isb_epochs': []  # 对应的时间戳
         }
-        
+
         self.update_progress(10)
-        
+
         # 计算每个历元的双差和ISB
         valid_epochs = 0
-        
+
         for epoch_idx, epoch_time in enumerate(common_times):
             if epoch_idx % 100 == 0:
                 self.update_progress(10 + int(epoch_idx / len(common_times) * 80))
-            
+
             # 获取基准卫星的观测值
             ref_phone_pr = self._get_pseudorange_at_time(phone_data, reference_sat, 'L2I', epoch_time)
             ref_receiver_pr = self._get_pseudorange_at_time(receiver_data, reference_sat, 'L2I', epoch_time)
-            
+
             if ref_phone_pr is None or ref_receiver_pr is None:
                 continue
-            
+
             epoch_single_diffs = {}
             epoch_double_diffs = {}
-            
+
             # 计算所有卫星与基准卫星的单差
             all_sats = stable_bds2 + stable_bds3
             for sat_id in all_sats:
                 if sat_id == reference_sat:
                     continue
-                
+
                 # 获取当前卫星的观测值
                 sat_phone_pr = self._get_pseudorange_at_time(phone_data, sat_id, 'L2I', epoch_time)
                 sat_receiver_pr = self._get_pseudorange_at_time(receiver_data, sat_id, 'L2I', epoch_time)
-                
+
                 if sat_phone_pr is None or sat_receiver_pr is None:
                     continue
-                
+
                 # 星间单差：SD = PR_benchmark - PR_sat
                 phone_sd = ref_phone_pr - sat_phone_pr
                 receiver_sd = ref_receiver_pr - sat_receiver_pr
-                
+
                 epoch_single_diffs[sat_id] = {
                     'phone': phone_sd,
                     'receiver': receiver_sd
                 }
-                
+
                 # 站间单差：DD = SD_phone - SD_receiver
                 double_diff = phone_sd - receiver_sd
                 epoch_double_diffs[sat_id] = double_diff
-            
+
             # 存储单差和双差结果
             isb_results['single_differences'][epoch_time] = epoch_single_diffs
             isb_results['double_differences'][epoch_time] = epoch_double_diffs
-            
+
             # 计算该历元的ISB（BDS-3卫星双差的平均值）
             bds3_double_diffs = []
             for sat_id in stable_bds3:
                 if sat_id in epoch_double_diffs:
                     bds3_double_diffs.append(epoch_double_diffs[sat_id])
-            
+
             if bds3_double_diffs:
                 isb_epoch = np.mean(bds3_double_diffs)
                 isb_results['isb_estimates'].append(isb_epoch)
@@ -4307,15 +4354,15 @@ class GNSSAnalyzer:
                     print(f"    调试信息：历元 {epoch_idx} 没有BDS-3双差数据")
                     print(f"    调试信息：稳定BDS-3卫星: {stable_bds3}")
                     print(f"    调试信息：当前历元双差: {epoch_double_diffs}")
-        
+
         self.update_progress(90)
-        
+
         # 计算ISB统计量
         if isb_results['isb_estimates']:
             isb_values = np.array(isb_results['isb_estimates'])
             isb_results['isb_mean'] = np.mean(isb_values)
             isb_results['isb_std'] = np.std(isb_values)
-            
+
             print(f"ISB计算结果:")
             print(f"  有效历元数: {valid_epochs}")
             print(f"  ISB均值: {isb_results['isb_mean']:.3f} m")
@@ -4323,40 +4370,40 @@ class GNSSAnalyzer:
             print(f"  ISB范围: [{np.min(isb_values):.3f}, {np.max(isb_values):.3f}] m")
         else:
             print("警告: 没有有效的ISB估计值")
-        
+
         self.update_progress(100)
         return isb_results
-    
+
     def _get_pseudorange_at_time(self, data: Dict, sat_id: str, freq: str, target_time: datetime.datetime) -> float:
         """获取指定时间最接近的伪距观测值"""
         if sat_id not in data or freq not in data[sat_id]:
             return None
-        
+
         freq_data = data[sat_id][freq]
         times = freq_data['times']
         code_values = freq_data.get('code', [])
-        
+
         if not times or not code_values:
             return None
-        
+
         # 找到最接近的时间戳
         min_diff = float('inf')
         closest_idx = -1
-        
+
         for i, time in enumerate(times):
             diff = abs((time - target_time).total_seconds())
             if diff < min_diff:
                 min_diff = diff
                 closest_idx = i
-        
+
         # 如果时间差超过0.1秒，认为没有观测
         if min_diff > 0.1:
             return None
-        
+
         # 返回对应的伪距观测值
         if closest_idx < len(code_values) and code_values[closest_idx] is not None:
             return code_values[closest_idx]
-        
+
         return None
 
     def plot_isb_analysis(self, isb_results: Dict, save=True, show=True) -> None:
@@ -4365,52 +4412,52 @@ class GNSSAnalyzer:
         import matplotlib
         original_backend = matplotlib.get_backend()
         matplotlib.use('Agg')
-        
+
         if not isb_results['isb_estimates']:
             print("没有ISB数据可供绘制")
             return
-        
+
         # 创建图表目录（使用手机文件的结果目录）
         phone_file_name = os.path.basename(self.input_file_path)
         phone_file_name_no_ext = os.path.splitext(phone_file_name)[0]
         phone_result_dir = os.path.join("results", phone_file_name_no_ext)
         isb_dir = os.path.join(phone_result_dir, "BDS23_ISB")
         os.makedirs(isb_dir, exist_ok=True)
-        
+
         # 1. ISB时间序列图
         fig, axes = plt.subplots(2, 2, figsize=(15, 10))
         fig.suptitle('BDS-2/BDS-3 System Inter-Bias (ISB) Analysis', fontsize=16, fontweight='bold')
-        
+
         # ISB时间序列
         ax1 = axes[0, 0]
         isb_values = np.array(isb_results['isb_estimates'])
         epochs = isb_results['isb_epochs']
-        
+
         ax1.plot(epochs, isb_values, 'b-', linewidth=1, alpha=0.7, label='ISB Time Series')
-        ax1.axhline(y=isb_results['isb_mean'], color='r', linestyle='--', 
-                   label=f'Mean: {isb_results["isb_mean"]:.3f}m')
-        ax1.axhline(y=isb_results['isb_mean'] + isb_results['isb_std'], color='orange', linestyle=':', 
-                   label=f'+1σ: {isb_results["isb_mean"] + isb_results["isb_std"]:.3f}m')
-        ax1.axhline(y=isb_results['isb_mean'] - isb_results['isb_std'], color='orange', linestyle=':', 
-                   label=f'-1σ: {isb_results["isb_mean"] - isb_results["isb_std"]:.3f}m')
-        
+        ax1.axhline(y=isb_results['isb_mean'], color='r', linestyle='--',
+                    label=f'Mean: {isb_results["isb_mean"]:.3f}m')
+        ax1.axhline(y=isb_results['isb_mean'] + isb_results['isb_std'], color='orange', linestyle=':',
+                    label=f'+1σ: {isb_results["isb_mean"] + isb_results["isb_std"]:.3f}m')
+        ax1.axhline(y=isb_results['isb_mean'] - isb_results['isb_std'], color='orange', linestyle=':',
+                    label=f'-1σ: {isb_results["isb_mean"] - isb_results["isb_std"]:.3f}m')
+
         ax1.set_xlabel('Time')
         ax1.set_ylabel('ISB (m)')
         ax1.set_title('ISB Time Series')
         ax1.legend()
         ax1.grid(True, alpha=0.3)
-        
+
         # ISB直方图
         ax2 = axes[0, 1]
         ax2.hist(isb_values, bins=30, alpha=0.7, color='skyblue', edgecolor='black')
-        ax2.axvline(x=isb_results['isb_mean'], color='r', linestyle='--', linewidth=2, 
-                   label=f'Mean: {isb_results["isb_mean"]:.3f}m')
+        ax2.axvline(x=isb_results['isb_mean'], color='r', linestyle='--', linewidth=2,
+                    label=f'Mean: {isb_results["isb_mean"]:.3f}m')
         ax2.set_xlabel('ISB (m)')
         ax2.set_ylabel('Frequency')
         ax2.set_title('ISB Distribution Histogram')
         ax2.legend()
         ax2.grid(True, alpha=0.3)
-        
+
         # ISB统计信息
         ax3 = axes[1, 0]
         ax3.axis('off')
@@ -4427,177 +4474,177 @@ Time Range:
 {epochs[0].strftime('%Y-%m-%d %H:%M:%S')} 
 to 
 {epochs[-1].strftime('%Y-%m-%d %H:%M:%S')}"""
-        
+
         ax3.text(0.05, 0.95, stats_text, transform=ax3.transAxes, fontsize=12,
-                verticalalignment='top', fontfamily='monospace',
-                bbox=dict(boxstyle='round,pad=0.5', facecolor='lightgray', alpha=0.8, 
-                         edgecolor='black', linewidth=1))
-        
+                 verticalalignment='top', fontfamily='monospace',
+                 bbox=dict(boxstyle='round,pad=0.5', facecolor='lightgray', alpha=0.8,
+                           edgecolor='black', linewidth=1))
+
         # ISB残差分析
         ax4 = axes[1, 1]
         residuals = isb_values - isb_results['isb_mean']
         ax4.plot(epochs, residuals, 'g-', linewidth=1, alpha=0.7)
         ax4.axhline(y=0, color='r', linestyle='-', linewidth=1)
-        ax4.axhline(y=isb_results['isb_std'], color='orange', linestyle='--', 
-                   label=f'+1σ: {isb_results["isb_std"]:.3f}m')
-        ax4.axhline(y=-isb_results['isb_std'], color='orange', linestyle='--', 
-                   label=f'-1σ: {-isb_results["isb_std"]:.3f}m')
-        
+        ax4.axhline(y=isb_results['isb_std'], color='orange', linestyle='--',
+                    label=f'+1σ: {isb_results["isb_std"]:.3f}m')
+        ax4.axhline(y=-isb_results['isb_std'], color='orange', linestyle='--',
+                    label=f'-1σ: {-isb_results["isb_std"]:.3f}m')
+
         ax4.set_xlabel('Time')
         ax4.set_ylabel('ISB Residual (m)')
         ax4.set_title('ISB Residual Time Series')
         ax4.legend()
         ax4.grid(True, alpha=0.3)
-        
+
         plt.tight_layout()
-        
+
         if save:
             plt.savefig(os.path.join(isb_dir, 'isb_analysis.png'), dpi=300, bbox_inches='tight')
             print(f"ISB分析图表已保存到: {os.path.join(isb_dir, 'isb_analysis.png')}")
-        
+
         if show:
             plt.show()
         else:
             plt.close()
-        
+
         # 恢复原来的后端设置
         matplotlib.use(original_backend)
-        
+
         # 2. 双差分析图
         self._plot_double_difference_analysis(isb_results, isb_dir, save, show)
-    
-    def _plot_double_difference_analysis(self, isb_results: Dict, output_dir: str, save: bool = True, show: bool = True):
+
+    def _plot_double_difference_analysis(self, isb_results: Dict, output_dir: str, save: bool = True,
+                                         show: bool = True):
         """绘制双差分析图表"""
         # 临时设置非交互式后端以避免线程警告
         import matplotlib
         original_backend = matplotlib.get_backend()
         matplotlib.use('Agg')
-        
+
         double_diffs = isb_results['double_differences']
         if not double_diffs:
             return
-        
+
         # 收集所有BDS-3卫星的双差数据
         bds3_sats = set()
         for epoch_data in double_diffs.values():
             bds3_sats.update(epoch_data.keys())
-        
+
         # 过滤出BDS-3卫星（PRN >= 19）
-        bds3_sats = [sat for sat in bds3_sats if sat.startswith('C') and 
+        bds3_sats = [sat for sat in bds3_sats if sat.startswith('C') and
                      int(sat[1:]) >= 19]
-        
+
         if not bds3_sats:
             return
-        
+
         fig, axes = plt.subplots(2, 2, figsize=(15, 10))
         fig.suptitle('BDS-3卫星双差分析', fontsize=16, fontweight='bold')
-        
+
         # 选择前4颗BDS-3卫星进行详细分析
         selected_sats = bds3_sats[:4]
-        
+
         for i, sat_id in enumerate(selected_sats):
-            ax = axes[i//2, i%2]
-            
+            ax = axes[i // 2, i % 2]
+
             # 收集该卫星的双差数据
             sat_double_diffs = []
             sat_epochs = []
-            
+
             for epoch_time, epoch_data in double_diffs.items():
                 if sat_id in epoch_data:
                     sat_double_diffs.append(epoch_data[sat_id])
                     sat_epochs.append(epoch_time)
-            
+
             if sat_double_diffs:
                 ax.plot(sat_epochs, sat_double_diffs, 'b-', linewidth=1, alpha=0.7)
                 ax.set_title(f'{sat_id} 双差时间序列')
                 ax.set_xlabel('时间')
                 ax.set_ylabel('双差 (m)')
                 ax.grid(True, alpha=0.3)
-        
+
         plt.tight_layout()
-        
+
         if save:
-            plt.savefig(os.path.join(output_dir, 'bds3_double_differences.png'), 
-                       dpi=300, bbox_inches='tight')
+            plt.savefig(os.path.join(output_dir, 'bds3_double_differences.png'),
+                        dpi=300, bbox_inches='tight')
             print(f"BDS-3双差分析图表已保存到: {os.path.join(output_dir, 'bds3_double_differences.png')}")
-        
+
         if show:
             plt.show()
         else:
             plt.close()
-        
+
         # 恢复原来的后端设置
         matplotlib.use(original_backend)
 
     def correct_isb_and_generate_rinex(self, isb_results: Dict, input_rinex_path: str, output_path: str = None) -> str:
         """基于ISB校正BDS-3伪距观测值并生成新的RINEX文件"""
         self.start_stage(8, "ISB校正并生成RINEX文件", 100)
-        
+
         if not isb_results['isb_estimates']:
             raise ValueError("没有有效的ISB估计值，无法进行校正")
-        
+
         isb_correction = isb_results['isb_mean']
         print(f"应用ISB校正: {isb_correction:.3f} m")
-        
+
         # 读取RINEX文件头信息以获取观测类型映射
         print("正在读取RINEX文件头信息...")
         rinex_data = self.read_rinex_obs(input_rinex_path)
         # 将观测类型信息保存到实例变量中，供ISB校正函数使用
         self.rinex_data = rinex_data
-        
+
         # 初始化BDS-3卫星伪距修改详情记录
         modification_details = {}
         total_modifications = 0
         modified_satellites = set()
-        
-        
+
         # 确定输出文件路径
         if output_path is None:
             # 使用手机文件的结果目录
             phone_file_name = os.path.basename(self.input_file_path)
             phone_file_name_no_ext = os.path.splitext(phone_file_name)[0]
             phone_result_dir = os.path.join("results", phone_file_name_no_ext)
-            
+
             # 创建BDS23_ISB子文件夹
             isb_dir = os.path.join(phone_result_dir, "BDS23_ISB")
             if not os.path.exists(isb_dir):
                 os.makedirs(isb_dir)
-            
+
             # 使用cleaned2文件作为基础，添加-isb后缀
             input_name = os.path.basename(input_rinex_path)
             name, ext = os.path.splitext(input_name)
             output_path = os.path.join(isb_dir, f"{name}-isb{ext}")
-        
+
         self.update_progress(10)
-        
+
         # 读取原始RINEX文件
         with open(input_rinex_path, 'r', encoding='utf-8') as f:
             lines = [line.rstrip('\n') for line in f]
-        
+
         self.update_progress(20)
-        
+
         # 找到头部结束位置
         header_end = 0
         for i, line in enumerate(lines):
             if 'END OF HEADER' in line:
                 header_end = i + 1
                 break
-        
+
         # 处理观测数据
         corrected_lines = lines[:header_end].copy()
         data_lines = lines[header_end:]
-        
+
         self.update_progress(30)
-        
+
         # 处理每个历元
         processed_epochs = 0
         total_epochs = len([line for line in data_lines if line.startswith('>') and len(line) > 32])
-        
+
         i = 0
         epoch_count = 0
         while i < len(data_lines):
             line = data_lines[i]
-            
+
             # 检查是否是历元行
             if line.startswith('>') and len(line) > 32:
                 epoch_count += 1
@@ -4613,16 +4660,16 @@ to
                         minute = int(parts[4])
                         second_float = float(parts[5])
                         second = second_float
-                        
+
                     if len(parts) < 6:
                         continue
-                    epoch_time = datetime.datetime(year, month, day, hour, minute, int(second), 
-                                                int((second - int(second)) * 1000000))
-                    
+                    epoch_time = datetime.datetime(year, month, day, hour, minute, int(second),
+                                                   int((second - int(second)) * 1000000))
+
                     # 检查是否需要校正（在ISB计算的时间范围内）
                     if 'isb_epochs' not in isb_results:
                         isb_results['isb_epochs'] = []
-                    
+
                     # 显示ISB时间戳信息（只显示一次）
                     if not hasattr(self, '_isb_epochs_info_shown'):
                         print(f"ISB计算历元数: {len(isb_results['isb_epochs'])}")
@@ -4631,22 +4678,22 @@ to
                         else:
                             print("警告: ISB时间戳列表为空！")
                         self._isb_epochs_info_shown = True
-                    
+
                     # 检查时间是否在ISB计算范围内（使用容差匹配）
                     is_in_range = False
                     min_time_diff = float('inf')
                     closest_isb_epoch = None
-                    
+
                     if not isb_results['isb_epochs']:
                         continue
-                    
+
                     for isb_epoch in isb_results['isb_epochs']:
                         # 确保时间类型一致，将pandas Timestamp转换为datetime
                         if hasattr(isb_epoch, 'to_pydatetime'):
                             isb_epoch_dt = isb_epoch.to_pydatetime()
                         else:
                             isb_epoch_dt = isb_epoch
-                        
+
                         time_diff = abs((epoch_time - isb_epoch_dt).total_seconds())
                         if time_diff < min_time_diff:
                             min_time_diff = time_diff
@@ -4654,51 +4701,46 @@ to
                         if time_diff <= 0.1:
                             is_in_range = True
                             break
-                    
-                    
+
                     # 统计时间匹配执行次数
                     if not hasattr(self, '_time_match_execution_count'):
                         self._time_match_execution_count = 0
                     self._time_match_execution_count += 1
-                    
+
                     if is_in_range:
-                        
+
                         # 读取该历元的观测数据
                         epoch_lines = [line]
                         i += 1
-                        
+
                         # 读取卫星数据（RINEX格式中历元行后直接跟着卫星数据）
                         sat_prns = []
                         obs_lines = []
-                        
-                        
+
                         # 读取所有卫星数据行，直到遇到下一个历元行或文件结束
                         while i < len(data_lines):
                             line = data_lines[i]
-                            
+
                             # 如果遇到下一个历元行，停止读取
                             if line.startswith('>'):
                                 break
-                            
+
                             # 如果行长度足够且以卫星系统标识开头，认为是卫星数据行
                             if len(line) >= 3 and line[0] in ['G', 'R', 'E', 'C', 'J', 'I', 'S']:
                                 sat_prn = line[:3]
                                 sat_prns.append(sat_prn)
                                 obs_lines.append(line)
-                                
-                            
+
                             i += 1
-                        
-                        
+
                         # 将卫星数据添加到历元行中
                         epoch_lines.extend(obs_lines)
-                        
+
                         # 校正BDS-3卫星的伪距观测值
                         corrected_epoch_lines, epoch_modifications = self._apply_isb_correction_to_epoch(
                             epoch_lines, sat_prns, isb_correction, epoch_time
                         )
-                        
-                        
+
                         # 记录修改详情
                         if epoch_modifications:
                             for sat_id, mod_info in epoch_modifications.items():
@@ -4707,14 +4749,14 @@ to
                                 modification_details[sat_id].append(mod_info)
                                 total_modifications += 1
                                 modified_satellites.add(sat_id)
-                        
+
                         corrected_lines.extend(corrected_epoch_lines)
                         processed_epochs += 1
                     else:
                         # 不在校正范围内，保持原样
                         corrected_lines.append(line)
                         i += 1
-                        
+
                 except (ValueError, IndexError):
                     # 如果解析失败，保持原样
                     corrected_lines.append(line)
@@ -4722,51 +4764,52 @@ to
             else:
                 corrected_lines.append(line)
                 i += 1
-            
+
             # 更新进度
             if processed_epochs % 100 == 0:
                 progress = 30 + int(processed_epochs / total_epochs * 60) if total_epochs > 0 else 90
                 self.update_progress(progress)
-        
+
         self.update_progress(90)
-        
+
         # 写入校正后的RINEX文件
         with open(output_path, 'w', encoding='utf-8') as f:
             for line in corrected_lines:
                 f.write(line + '\n')
-        
+
         self.update_progress(100)
-        
+
         # 保存修改详情到结果中
         self.results['isb_modification_details'] = {
             'modification_details': modification_details,
             'total_modifications': total_modifications,
             'modified_satellites': list(modified_satellites)
         }
-        
+
         print(f"ISB校正完成！")
         print(f"  处理历元数: {processed_epochs}")
         print(f"  校正值: {isb_correction:.3f} m")
         print(f"  BDS-3卫星伪距修改: {total_modifications} 个观测值")
         print(f"  涉及卫星: {', '.join(modified_satellites)}")
         print(f"  输出文件: {output_path}")
-        
+
         # 显示时间匹配执行统计
         if hasattr(self, '_time_match_execution_count'):
             print(f"  时间匹配执行次数: {self._time_match_execution_count}")
         else:
             print(f"  时间匹配执行次数: 0")
-        
+
         return output_path
-    
-    def _apply_isb_correction_to_epoch(self, epoch_lines: list, sat_prns: list, isb_correction: float, epoch_time: datetime.datetime) -> tuple:
+
+    def _apply_isb_correction_to_epoch(self, epoch_lines: list, sat_prns: list, isb_correction: float,
+                                       epoch_time: datetime.datetime) -> tuple:
         """对单个历元应用ISB校正"""
         corrected_lines = epoch_lines.copy()
         modifications = {}
-        
+
         # 找到观测值行的起始位置（跳过历元行，直接是卫星数据行）
         obs_start_idx = 1  # 历元行后直接跟着卫星数据行
-        
+
         # 识别并校正BDS-3卫星
         bds3_sats = []
         for i, sat_prn in enumerate(sat_prns):
@@ -4783,7 +4826,7 @@ to
                                 corrected_lines[obs_line_idx], isb_correction, sat_prn
                             )
                             corrected_lines[obs_line_idx] = corrected_line
-                            
+
                             # 记录修改详情
                             if mod_info:
                                 modifications[sat_prn] = {
@@ -4795,37 +4838,38 @@ to
                                     'freq': 'L2I'
                                 }
                 except (ValueError, IndexError):
-                    continue    
-        
+                    continue
+
         return corrected_lines, modifications
-    
+
     def _apply_isb_correction_to_obs_line(self, obs_line: str, isb_correction: float, sat_prn: str = None) -> tuple:
         """对观测值行应用ISB校正"""
         if len(obs_line) < 3:  # 确保行长度足够包含卫星PRN
             return obs_line, None
-        
+
         # 获取该卫星系统的观测类型信息
         sat_system = sat_prn[0] if sat_prn else 'C'
-        
+
         # 从RINEX数据中获取观测类型信息
         obs_types = []
         if hasattr(self, 'rinex_data') and self.rinex_data and 'header' in self.rinex_data:
             obs_types = self.rinex_data['header'].get(f'obs_types_{sat_system}', [])
-        
+
         # 如果仍然获取失败，使用默认的BDS观测类型
         if not obs_types:
-            obs_types = ['C1I', 'C2I', 'C5I', 'C6I', 'C7I', 'C8I', 'L1I', 'L2I', 'L5I', 'L6I', 'L7I', 'L8I', 'S1I', 'S2I', 'S5I', 'S6I', 'S7I', 'S8I']
-        
+            obs_types = ['C1I', 'C2I', 'C5I', 'C6I', 'C7I', 'C8I', 'L1I', 'L2I', 'L5I', 'L6I', 'L7I', 'L8I', 'S1I',
+                         'S2I', 'S5I', 'S6I', 'S7I', 'S8I']
+
         # 查找L2I频率的伪距观测值（C2I）
         code_obs_type = 'C2I'  # BDS L2I频率的伪距观测类型
-        
+
         if code_obs_type in obs_types:
             code_idx = obs_types.index(code_obs_type)
-            
+
             # 精确定位C2I字段位置（参考码相不一致性处理的方法）
             start_pos = 3 + code_idx * 16  # 3: 卫星标识长度，16: 字段宽度
             end_pos = start_pos + 16
-            
+
             if end_pos <= len(obs_line):
                 # 读取原始伪距值
                 original_field = obs_line[start_pos:end_pos].strip()
@@ -4835,15 +4879,15 @@ to
                         if original_pr != 0.0:  # 确保不是空观测值
                             # 应用ISB校正：PR_corrected = PR_raw - ISB
                             corrected_pr = original_pr - isb_correction
-                            
+
                             # 格式化校正后的伪距值（保持16字符宽度，右对齐）
                             formatted_pr = f"{corrected_pr:14.3f}".rjust(16)
-                            
+
                             # 只替换目标字段，其他字段保持不变
                             modified_line = list(obs_line)
                             modified_line[start_pos:end_pos] = formatted_pr
                             corrected_line = ''.join(modified_line)
-                            
+
                             # 返回修改信息
                             mod_info = {
                                 'original_pr': original_pr,
@@ -4852,7 +4896,7 @@ to
                             return corrected_line, mod_info
                     except (ValueError, IndexError):
                         pass
-        
+
         return obs_line, None
 
     def perform_complete_isb_analysis(self, receiver_rinex_path: str, output_path: str = None) -> Dict:
@@ -4860,10 +4904,10 @@ to
         print("=" * 60)
         print("开始BDS-2/BDS-3系统间偏差(ISB)完整分析")
         print("=" * 60)
-        
+
         # 创建ISB分析日志文件
         log_file_path = self._create_isb_log_file()
-        
+
         try:
             # 检查并使用cleaned2文件作为输入
             phone_file_name = os.path.basename(self.input_file_path)
@@ -4873,7 +4917,7 @@ to
             cci_file_name = f"{phone_file_name_no_ext}-cc inconsistency.25o"
             cleaned2_file_name = f"cleaned2-{cci_file_name}"
             cleaned2_file_path = os.path.join(coarse_error_dir, cleaned2_file_name)
-            
+
             # 只有在目录存在时才检查文件
             if os.path.exists(coarse_error_dir) and os.path.exists(cleaned2_file_path):
                 print(f"使用cleaned2文件进行ISB分析: {cleaned2_file_name}")
@@ -4881,64 +4925,65 @@ to
                 self.read_rinex_obs(cleaned2_file_path)
             else:
                 print("cleaned2文件不存在，使用原始文件进行ISB分析")
-            
+
             # 第一阶段：数据准备与预处理
             print("\n第一阶段：数据准备与预处理")
             print("-" * 40)
             self._log_isb_info(log_file_path, "第一阶段：数据准备与预处理")
-            
+
             isb_data = self.prepare_isb_data(receiver_rinex_path)
             print(f"共同时间戳数量: {len(isb_data['common_times'])}")
             print(f"BDS-2卫星数量: {len(isb_data['bds2_sats'])}")
             print(f"BDS-3卫星数量: {len(isb_data['bds3_sats'])}")
-            
+
             self._log_isb_info(log_file_path, f"共同时间戳数量: {len(isb_data['common_times'])}")
             self._log_isb_info(log_file_path, f"BDS-2卫星数量: {len(isb_data['bds2_sats'])}")
             self._log_isb_info(log_file_path, f"BDS-3卫星数量: {len(isb_data['bds3_sats'])}")
             self._log_isb_info(log_file_path, f"BDS-2卫星: {', '.join(isb_data['bds2_sats'])}")
             self._log_isb_info(log_file_path, f"BDS-3卫星: {', '.join(isb_data['bds3_sats'])}")
-            
+
             # 第二阶段：卫星选择
             print("\n第二阶段：卫星选择")
             print("-" * 40)
             self._log_isb_info(log_file_path, "\n第二阶段：卫星选择")
-            
+
             reference_sat = self.select_reference_satellite(isb_data)
             stable_sats = self.filter_stable_satellites(isb_data)
-            
+
             self._log_isb_info(log_file_path, f"选择的基准卫星: {reference_sat}")
             self._log_isb_info(log_file_path, f"稳定BDS-2卫星: {', '.join(stable_sats['stable_bds2'])}")
             self._log_isb_info(log_file_path, f"稳定BDS-3卫星: {', '.join(stable_sats['stable_bds3'])}")
-            
+
             # 第三阶段：ISB计算
             print("\n第三阶段：ISB计算")
             print("-" * 40)
             self._log_isb_info(log_file_path, "\n第三阶段：ISB计算")
-            
+
             isb_results = self.calculate_isb_double_difference(isb_data, reference_sat, stable_sats)
-            
+
             self._log_isb_info(log_file_path, f"ISB均值: {isb_results['isb_mean']:.6f} m")
             self._log_isb_info(log_file_path, f"ISB标准差: {isb_results['isb_std']:.6f} m")
             self._log_isb_info(log_file_path, f"有效历元数: {len(isb_results['isb_estimates'])}")
-            self._log_isb_info(log_file_path, f"ISB范围: [{min(isb_results['isb_estimates']):.6f}, {max(isb_results['isb_estimates']):.6f}] m")
-            
+            self._log_isb_info(log_file_path,
+                               f"ISB范围: [{min(isb_results['isb_estimates']):.6f}, {max(isb_results['isb_estimates']):.6f}] m")
+
             # 第四阶段：ISB统计分析和可视化
             print("\n第四阶段：ISB统计分析和可视化")
             print("-" * 40)
             self._log_isb_info(log_file_path, "\n第四阶段：ISB统计分析和可视化")
-            
+
             self.plot_isb_analysis(isb_results, save=True, show=False)
-            
+
             # 第五阶段：ISB校正
             print("\n第五阶段：ISB校正")
             print("-" * 40)
             self._log_isb_info(log_file_path, "\n第五阶段：ISB校正")
-            
+
             # 确定用于校正的输入文件
             input_file_for_correction = self.input_file_path
             if os.path.exists(coarse_error_dir) and os.path.exists(cleaned2_file_path):
                 input_file_for_correction = cleaned2_file_path
-            
+
             if input_file_for_correction:
                 corrected_file = self.correct_isb_and_generate_rinex(
                     isb_results, input_file_for_correction, output_path
@@ -4948,21 +4993,20 @@ to
             else:
                 print("警告: 没有输入RINEX文件路径，跳过校正步骤")
                 self._log_isb_info(log_file_path, "警告: 没有输入RINEX文件路径，跳过校正步骤")
-            
+
             # 保存ISB分析结果
             self.results['isb_analysis'] = isb_results
-            
-            
+
             # 生成ISB分析报告
             self._generate_isb_report(isb_results, log_file_path)
-            
+
             print("\n" + "=" * 60)
             print("ISB分析完成！")
             print("=" * 60)
             print(f"ISB分析日志文件: {log_file_path}")
-            
+
             return isb_results
-            
+
         except Exception as e:
             error_msg = f"ISB分析过程中出现错误: {str(e)}"
             print(error_msg)
@@ -4977,12 +5021,12 @@ to
             phone_file_name_no_ext = os.path.splitext(phone_file_name)[0]
             base_result_dir = os.path.join("results", phone_file_name_no_ext)
             self.current_result_dir = os.path.join(base_result_dir, "BDS23_ISB")
-        
+
         os.makedirs(self.current_result_dir, exist_ok=True)
-        
+
         # 生成日志文件名（不包含时间戳）
         log_file_path = os.path.join(self.current_result_dir, "isb_analysis_log.txt")
-        
+
         # 写入日志文件头
         with open(log_file_path, 'w', encoding='utf-8') as f:
             f.write("=" * 80 + "\n")
@@ -4991,9 +5035,9 @@ to
             f.write(f"分析开始时间: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
             f.write(f"手机RINEX文件: {self.input_file_path}\n")
             f.write("=" * 80 + "\n\n")
-        
+
         return log_file_path
-    
+
     def _log_isb_info(self, log_file_path: str, message: str):
         """记录ISB分析信息到日志文件"""
         try:
@@ -5001,13 +5045,13 @@ to
                 f.write(f"{datetime.datetime.now().strftime('%H:%M:%S')} - {message}\n")
         except Exception as e:
             print(f"写入日志文件失败: {e}")
-    
+
     def _generate_isb_report(self, isb_results: Dict, log_file_path: str):
         """生成ISB分析报告"""
         try:
             # 创建报告文件
             report_file_path = os.path.join(self.current_result_dir, "isb_analysis_report.txt")
-            
+
             with open(report_file_path, 'w', encoding='utf-8') as f:
                 f.write("=" * 80 + "\n")
                 f.write("BDS-2/BDS-3系统间偏差(ISB)分析报告\n")
@@ -5015,15 +5059,16 @@ to
                 f.write(f"报告生成时间: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
                 f.write(f"手机RINEX文件: {self.input_file_path}\n")
                 f.write("=" * 80 + "\n\n")
-                
+
                 # 1. 分析概述
                 f.write("1. 分析概述\n")
                 f.write("-" * 40 + "\n")
                 f.write(f"基准卫星: {isb_results['reference_satellite']}\n")
                 f.write(f"分析频率: L2I (1561.098 MHz)\n")
                 f.write(f"有效历元数: {len(isb_results['isb_estimates'])}\n")
-                f.write(f"时间范围: {isb_results['isb_epochs'][0].strftime('%Y-%m-%d %H:%M:%S')} 至 {isb_results['isb_epochs'][-1].strftime('%Y-%m-%d %H:%M:%S')}\n\n")
-                
+                f.write(
+                    f"时间范围: {isb_results['isb_epochs'][0].strftime('%Y-%m-%d %H:%M:%S')} 至 {isb_results['isb_epochs'][-1].strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+
                 # 2. ISB统计结果
                 f.write("2. ISB统计结果\n")
                 f.write("-" * 40 + "\n")
@@ -5032,7 +5077,7 @@ to
                 f.write(f"ISB最小值: {min(isb_results['isb_estimates']):.6f} m\n")
                 f.write(f"ISB最大值: {max(isb_results['isb_estimates']):.6f} m\n")
                 f.write(f"ISB范围: {max(isb_results['isb_estimates']) - min(isb_results['isb_estimates']):.6f} m\n\n")
-                
+
                 # 3. 数据质量评估
                 f.write("3. 数据质量评估\n")
                 f.write("-" * 40 + "\n")
@@ -5040,11 +5085,12 @@ to
                 outliers = np.abs(isb_values - isb_results['isb_mean']) > 3 * isb_results['isb_std']
                 outlier_count = np.sum(outliers)
                 outlier_ratio = outlier_count / len(isb_values) * 100
-                
+
                 f.write(f"异常值数量: {outlier_count} ({outlier_ratio:.2f}%)\n")
-                f.write(f"数据完整性: {(1 - outlier_ratio/100)*100:.2f}%\n")
-                f.write(f"ISB稳定性: {'良好' if isb_results['isb_std'] < 1.0 else '一般' if isb_results['isb_std'] < 5.0 else '较差'}\n\n")
-                
+                f.write(f"数据完整性: {(1 - outlier_ratio / 100) * 100:.2f}%\n")
+                f.write(
+                    f"ISB稳定性: {'良好' if isb_results['isb_std'] < 1.0 else '一般' if isb_results['isb_std'] < 5.0 else '较差'}\n\n")
+
                 # 4. 校正信息
                 f.write("4. 校正信息\n")
                 f.write("-" * 40 + "\n")
@@ -5053,58 +5099,58 @@ to
                 f.write(f"校正值: {isb_results['isb_mean']:.6f} m\n")
                 f.write(f"校正对象: BDS-3卫星 (C19-C60)\n")
                 f.write(f"校正频率: L2I\n")
-                
+
                 if 'corrected_rinex_path' in isb_results:
                     f.write(f"校正后文件: {isb_results['corrected_rinex_path']}\n")
                 else:
                     f.write("校正后文件: 未生成\n")
-                
+
                 f.write("\n")
-                
+
                 # 5. BDS-3卫星伪距修改详情
                 f.write("5. BDS-3卫星伪距修改详情\n")
                 f.write("-" * 40 + "\n")
-                
+
                 modification_details = self.results.get('isb_modification_details', {})
                 if modification_details:
                     total_modifications = modification_details.get('total_modifications', 0)
                     modified_satellites = modification_details.get('modified_satellites', [])
                     sat_details = modification_details.get('modification_details', {})
-                    
+
                     f.write(f"BDS-3卫星伪距校正统计:\n")
                     f.write(f"- 总计修改 {total_modifications} 个伪距观测值\n")
                     f.write(f"- 涉及 {len(modified_satellites)} 颗BDS-3卫星\n")
                     f.write(f"- 修改的卫星: {', '.join(modified_satellites)}\n\n")
-                    
+
                     # 详细修改信息
                     f.write("各卫星伪距修改详情:\n")
                     f.write("-" * 50 + "\n")
-                    
+
                     for sat_id in modified_satellites:
                         if sat_id in sat_details:
                             details = sat_details[sat_id]
                             f.write(f"卫星 {sat_id}:\n")
-                            
+
                             # 按历元分组
                             from collections import defaultdict
                             epoch_groups = defaultdict(list)
                             for detail in details:
                                 if 'epoch' in detail:
                                     epoch_groups[detail['epoch']].append(detail)
-                            
+
                             for epoch in sorted(epoch_groups.keys()):
                                 epoch_details = epoch_groups[epoch]
                                 f.write(f"  历元 {epoch}:\n")
-                                
+
                                 for detail in epoch_details:
                                     f.write(f"    - {detail['freq']}: "
-                                           f"原始伪距={detail['original_pseudorange']:.6f}m, "
-                                           f"校正后伪距={detail['corrected_pseudorange']:.6f}m, "
-                                           f"ISB校正量={detail['isb_correction']:.6f}m\n")
+                                            f"原始伪距={detail['original_pseudorange']:.6f}m, "
+                                            f"校正后伪距={detail['corrected_pseudorange']:.6f}m, "
+                                            f"ISB校正量={detail['isb_correction']:.6f}m\n")
                             f.write("\n")
                 else:
                     f.write("无BDS-3卫星伪距修改记录\n\n")
-                
+
                 # 6. 技术说明
                 f.write("6. 技术说明\n")
                 f.write("-" * 40 + "\n")
@@ -5113,24 +5159,22 @@ to
                 f.write("2. 站间单差: DD_sat = SD_phone_sat - SD_receiver_sat\n")
                 f.write("3. ISB估计: ISB_epoch = mean(DD_BDS3)\n")
                 f.write("4. 伪距校正: PR_BDS3_corrected = PR_BDS3_raw - ISB_mean\n\n")
-                
+
                 f.write("数据要求:\n")
                 f.write("- 时间同步: 手机和接收机数据时间差 < 0.1秒\n")
                 f.write("- 信噪比: 动态阈值，根据实际数据质量确定\n")
                 f.write("- 覆盖率: ≥ 50%（基本筛选）\n")
                 f.write("- 最大连续缺失: ≤ 60秒\n\n")
-                
+
                 f.write("=" * 80 + "\n")
                 f.write("报告结束\n")
                 f.write("=" * 80 + "\n")
-            
+
             # 记录到日志
             self._log_isb_info(log_file_path, f"ISB分析报告已生成: {report_file_path}")
-            
+
         except Exception as e:
             self._log_isb_info(log_file_path, f"生成ISB分析报告失败: {str(e)}")
-
-
 
     # 剔除粗差保存新文件
     def remove_outliers_and_save(self, double_diffs, triple_errors):
@@ -5180,7 +5224,7 @@ to
         phone_file_name = os.path.basename(self.input_file_path)
         phone_file_name_no_ext = os.path.splitext(phone_file_name)[0]
         phone_result_dir = os.path.join("results", phone_file_name_no_ext)
-        
+
         # 检查是否存在基于伪距相位差值剔除后的文件
         coarse_error_dir = os.path.join(phone_result_dir, "Coarse error")
         cci_file_name = f"{phone_file_name_no_ext}-cc inconsistency.25o"
@@ -5816,7 +5860,6 @@ to
         finally:
             plt.close()  # 确保关闭图表，释放内存
 
-
     def save_report(self) -> None:
         """保存分析报告到当前文件结果目录"""
         self.start_stage(7, "保存分析报告", 100)
@@ -5923,7 +5966,7 @@ to
                             gc.collect()
                         processed_sats += 1
                         self.update_progress(32 + int(processed_sats / total_sats * 16))
-                        
+
                         # 每处理10个卫星后强制清理内存
                         if processed_sats % 10 == 0:
                             plt.close('all')
@@ -5959,7 +6002,7 @@ to
                             gc.collect()
                         processed_sats += 1
                         self.update_progress(47 + int(processed_sats / total_sats * 16))
-                        
+
                         # 每处理10个卫星后强制清理内存
                         if processed_sats % 10 == 0:
                             plt.close('all')
@@ -6021,7 +6064,6 @@ to
                 plt.close('all')
                 gc.collect()
                 print("--双差图表保存完成，内存已清理")
-
 
             # 完成进度
             self.update_progress(100)
@@ -6191,7 +6233,6 @@ to
         else:
             report += f"  共检测到 {total_outliers} 个频率通道存在双差超限值，建议结合图表分析具体历元\n"
 
-
         return report
 
     def reset_analysis(self):
@@ -6214,7 +6255,7 @@ to
 def center_window(window, width=None, height=None):
     """将窗口居中显示在屏幕上"""
     window.update_idletasks()
-    
+
     # 获取窗口尺寸
     if width is None or height is None:
         window_width = window.winfo_width()
@@ -6222,24 +6263,25 @@ def center_window(window, width=None, height=None):
     else:
         window_width = width
         window_height = height
-    
+
     # 获取屏幕尺寸
     screen_width = window.winfo_screenwidth()
     screen_height = window.winfo_screenheight()
-    
+
     # 计算居中位置
     x = (screen_width - window_width) // 2
     y = (screen_height - window_height) // 2
-    
+
     # 设置窗口位置
     window.geometry(f"{window_width}x{window_height}+{x}+{y}")
+
 
 def main():
     root = tk.Tk()
     root.title("GNSS数据分析器")
     root.geometry("800x500")
     root.resizable(True, True)
-    
+
     # 居中显示主窗口
     center_window(root, 800, 500)
 
@@ -6277,7 +6319,7 @@ def main():
 
     ttk.Label(desc_frame, text="• 预处理：码相不一致性建模和校正→CMC变化阈值剔除→历元间双差剔除→BDS-2/3 ISB分析校正",
               font=("Microsoft YaHei", 10)).pack(anchor=tk.W, pady=2)
-    ttk.Label(desc_frame, text="• BDS2/3 ISB分析：单独进行北斗二号与三号系统间偏差分析（需要接收机文件）",
+    ttk.Label(desc_frame, text="• BDS2/3 ISB分析：单独进行北斗二号与三号系统间偏差分析",
               font=("Microsoft YaHei", 10)).pack(anchor=tk.W, pady=2)
     ttk.Label(desc_frame, text="• 可视化：生成各类分析图表，支持单独保存和批量保存",
               font=("Microsoft YaHei", 10)).pack(anchor=tk.W, pady=2)
@@ -6301,9 +6343,9 @@ def main():
     # 版权信息
     copyright_frame = ttk.Frame(main_frame)
     copyright_frame.pack(fill=tk.X, pady=(20, 10))
-    
-    ttk.Label(copyright_frame, text="© 2025 cz", 
-              font=("Microsoft YaHei", 9), 
+
+    ttk.Label(copyright_frame, text="© 2025 cz",
+              font=("Microsoft YaHei", 9),
               foreground="gray").pack(anchor=tk.CENTER)
 
     def on_closing():
@@ -6335,7 +6377,7 @@ def show_cleaning_window(parent):
     cleaning_window.resizable(True, True)
     cleaning_window.transient(parent)
     cleaning_window.grab_set()
-    
+
     # 居中显示窗口
     center_window(cleaning_window, 700, 700)
 
@@ -6350,7 +6392,7 @@ def show_cleaning_window(parent):
     # 手机RINEX文件选择
     phone_frame = ttk.Frame(file_frame)
     phone_frame.pack(fill=tk.X, pady=5)
-    
+
     ttk.Label(phone_frame, text="手机RINEX文件:").pack(side=tk.LEFT)
     phone_file_var = tk.StringVar()
     phone_file_entry = ttk.Entry(phone_frame, textvariable=phone_file_var, width=50)
@@ -6369,23 +6411,23 @@ def show_cleaning_window(parent):
             phone_file_var.set(filename)
 
     ttk.Button(phone_frame, text="浏览", command=select_phone_file).pack(side=tk.RIGHT)
-    
+
     # 接收机RINEX文件选择（可选，用于码相不一致性建模）
     receiver_frame = ttk.Frame(file_frame)
     receiver_frame.pack(fill=tk.X, pady=5)
-    
+
     ttk.Label(receiver_frame, text="接收机RINEX文件(ISB分析必需):").pack(side=tk.LEFT)
     receiver_file_var = tk.StringVar()
     receiver_file_entry = ttk.Entry(receiver_frame, textvariable=receiver_file_var, width=50)
     receiver_file_entry.pack(side=tk.LEFT, padx=(10, 10), fill=tk.X, expand=True)
-    
+
     # 添加监听器，当接收机文件路径改变时更新按钮状态
     def on_receiver_file_change(*args):
         if receiver_file_var.get().strip():
             bds_only_btn.config(state='normal')
         else:
             bds_only_btn.config(state='disabled')
-    
+
     receiver_file_var.trace('w', on_receiver_file_change)
 
     def select_receiver_file():
@@ -6406,7 +6448,7 @@ def show_cleaning_window(parent):
             bds_only_btn.config(state='disabled')
 
     ttk.Button(receiver_frame, text="浏览", command=select_receiver_file).pack(side=tk.RIGHT)
-    
+
     # 兼容性：保持原有的file_var变量
     file_var = phone_file_var
 
@@ -6423,19 +6465,19 @@ def show_cleaning_window(parent):
     double_diff_frame.pack(fill=tk.X, pady=2)
 
     ttk.Label(double_diff_frame, text="历元间双差最大阈值:").pack(side=tk.LEFT)
-    
+
     # 伪距阈值
     ttk.Label(double_diff_frame, text="伪距(米):").pack(side=tk.LEFT, padx=(10, 0))
     code_threshold_var = tk.DoubleVar(value=10.0)
     code_threshold_entry = ttk.Entry(double_diff_frame, textvariable=code_threshold_var, width=8)
     code_threshold_entry.pack(side=tk.LEFT, padx=(5, 0))
-    
+
     # 相位阈值
     ttk.Label(double_diff_frame, text="相位(米):").pack(side=tk.LEFT, padx=(10, 0))
     phase_threshold_var = tk.DoubleVar(value=1.5)
     phase_threshold_entry = ttk.Entry(double_diff_frame, textvariable=phase_threshold_var, width=8)
     phase_threshold_entry.pack(side=tk.LEFT, padx=(5, 0))
-    
+
     # 多普勒阈值
     ttk.Label(double_diff_frame, text="多普勒(米/秒):").pack(side=tk.LEFT, padx=(10, 0))
     doppler_threshold_var = tk.DoubleVar(value=5.0)
@@ -6478,8 +6520,8 @@ def show_cleaning_window(parent):
     phone_only_frame.pack(fill=tk.X, pady=2)
 
     phone_only_var = tk.BooleanVar(value=False)
-    phone_only_checkbox = ttk.Checkbutton(phone_only_frame, text="启用手机独有卫星分析", 
-                                         variable=phone_only_var)
+    phone_only_checkbox = ttk.Checkbutton(phone_only_frame, text="启用手机独有卫星分析",
+                                          variable=phone_only_var)
     phone_only_checkbox.pack(side=tk.LEFT)
 
     ttk.Label(phone_only_frame, text="(检测手机独有卫星的码相不一致性)").pack(side=tk.LEFT, padx=(10, 0))
@@ -6489,7 +6531,7 @@ def show_cleaning_window(parent):
     isb_frame.pack(fill=tk.X, pady=5)
 
     # ISB分析说明
-    ttk.Label(isb_frame, text="使用动态基准卫星选择，自动选择质量最好的BDS-2卫星作为基准", 
+    ttk.Label(isb_frame, text="使用动态基准卫星选择，自动选择质量最好的BDS-2卫星作为基准",
               font=("Microsoft YaHei", 9)).pack(pady=5)
 
     # 进度显示
@@ -6514,7 +6556,7 @@ def show_cleaning_window(parent):
         if not phone_file_var.get():
             tk.messagebox.showerror("错误", "请先选择手机RINEX文件")
             return
-            
+
         if not receiver_file_var.get():
             tk.messagebox.showerror("错误", "BDS2/3 ISB分析需要接收机RINEX文件作为基准站")
             return
@@ -6559,7 +6601,7 @@ def show_cleaning_window(parent):
                 phone_file_name_no_ext = os.path.splitext(phone_file_name)[0]
                 phone_result_dir = os.path.join("results", phone_file_name_no_ext)
                 message = f"BDS2/3 ISB分析完成！\n结果保存在：{phone_result_dir}"
-                
+
                 # 显示ISB分析结果
                 if isb_results:
                     isb_mean = isb_results.get('isb_mean', 0)
@@ -6567,14 +6609,11 @@ def show_cleaning_window(parent):
                     message += f"\n\nISB分析结果:"
                     message += f"\nISB均值: {isb_mean:.3f} m"
                     message += f"\nISB标准差: {isb_std:.3f} m"
-                    
+
                     if 'corrected_rinex_path' in isb_results:
                         isb_corrected_file = isb_results['corrected_rinex_path']
                         message += f"\nISB校正后的RINEX文件：{isb_corrected_file}"
-                    
-                    # 添加报告和日志文件信息
-                    message += f"\n\nISB分析报告和日志文件已生成在：\n{analyzer.current_result_dir}"
-                
+
                 # 在主线程中显示消息框
                 parent.after(0, lambda: tk.messagebox.showinfo("完成", message))
 
@@ -6612,20 +6651,20 @@ def show_cleaning_window(parent):
                 file_path = file_var.get()
                 analyzer.input_file_path = file_path
                 analyzer.current_result_dir = os.path.join(os.path.dirname(file_path), "analysis_results")
-                
+
                 # 设置R方阈值
                 analyzer.r_squared_threshold = r_squared_var.get()
-                
+
                 # 设置CV值阈值
                 analyzer.cv_threshold = cv_threshold_var.get()
-                
+
                 # 设置历元间双差最大阈值
                 analyzer.max_threshold_limits = {
                     'code': code_threshold_var.get(),
                     'phase': phase_threshold_var.get(),
                     'doppler': doppler_threshold_var.get()
                 }
-                
+
                 # 设置手机独有卫星分析
                 analyzer.enable_phone_only_analysis = phone_only_var.get()
 
@@ -6643,7 +6682,7 @@ def show_cleaning_window(parent):
                     status_var.set("正在进行码相不一致性建模和校正...")
                     progress_var.set(20)
                     cleaning_window.update_idletasks()
-                    
+
                     try:
                         # 执行码相不一致性建模和校正
                         cci_results = analyzer.perform_code_phase_inconsistency_modeling(
@@ -6690,7 +6729,7 @@ def show_cleaning_window(parent):
                         status_var.set("正在进行ISB分析...")
                         progress_var.set(85)
                         cleaning_window.update_idletasks()
-                        
+
                         isb_results = analyzer.perform_complete_isb_analysis(receiver_file_var.get())
                         print("ISB分析完成")
                     except Exception as e:
@@ -6707,7 +6746,7 @@ def show_cleaning_window(parent):
                 phone_file_name_no_ext = os.path.splitext(phone_file_name)[0]
                 phone_result_dir = os.path.join("results", phone_file_name_no_ext)
                 message = f"数据预处理完成！\n结果保存在：{phone_result_dir}"
-                
+
                 # 显示处理步骤完成情况
                 message += "\n\n处理步骤完成情况："
                 message += "\n1. ✓ 码相不一致性建模和校正（如有接收机文件）"
@@ -6716,7 +6755,7 @@ def show_cleaning_window(parent):
                 message += "\n4. ✓ 历元间双差计算"
                 message += "\n5. ✓ 第二阶段剔除（双差阈值）"
                 message += "\n6. ✓ ISB分析（如有接收机文件）"
-                
+
                 if receiver_file_var.get() and cci_results:
                     # 显示码相不一致性建模和校正的实际文件路径
                     corrected_file_path = cci_results.get('corrected_rinex_path', '')
@@ -6724,20 +6763,20 @@ def show_cleaning_window(parent):
                         message += f"\n\n码相不一致性建模和校正已完成\n校正后的RINEX文件：{corrected_file_path}"
                     else:
                         message += "\n\n码相不一致性建模和校正已完成"
-                
+
                 if isb_results:
                     # 显示ISB分析结果
                     isb_mean = isb_results.get('isb_mean', 0)
                     isb_std = isb_results.get('isb_std', 0)
                     message += f"\n\nISB分析已完成\nISB均值: {isb_mean:.3f} m\nISB标准差: {isb_std:.3f} m"
-                    
+
                     if 'corrected_rinex_path' in isb_results:
                         isb_corrected_file = isb_results['corrected_rinex_path']
                         message += f"\nISB校正后的RINEX文件：{isb_corrected_file}"
-                    
+
                     # 添加报告和日志文件信息
                     message += f"\n\nISB分析报告和日志文件已生成在：\n{analyzer.current_result_dir}"
-                
+
                 # 在主线程中显示消息框
                 parent.after(0, lambda: tk.messagebox.showinfo("完成", message))
 
@@ -6788,7 +6827,7 @@ def show_charts_window(parent):
     charts_window.resizable(True, True)
     charts_window.transient(parent)
     charts_window.grab_set()
-    
+
     # 居中显示窗口
     center_window(charts_window, 700, 800)
 
@@ -7167,7 +7206,8 @@ def show_charts_window(parent):
                         return
                     valid_obs = [obs for obs in obs_data if obs is not None]
                     if len(valid_obs) < 2:
-                        messagebox.showerror("错误", f"卫星 {sat_prn} 频率 {freq} 的有效观测数据不足，至少需要2个有效观测值")
+                        messagebox.showerror("错误",
+                                             f"卫星 {sat_prn} 频率 {freq} 的有效观测数据不足，至少需要2个有效观测值")
                         status_var.set("生成失败")
                         return
                 else:
@@ -7217,23 +7257,29 @@ def show_charts_window(parent):
                             analyzer.read_receiver_rinex_obs(rx_file_var.get())
                             cmc_results = analyzer.calculate_receiver_cmc()
                             if sat_prn not in cmc_results or freq not in cmc_results.get(sat_prn, {}):
-                                messagebox.showerror("错误", f"接收机CMC无数据: {sat_prn} {freq}\n请确认RINEX包含所选卫星与频率")
+                                messagebox.showerror("错误",
+                                                     f"接收机CMC无数据: {sat_prn} {freq}\n请确认RINEX包含所选卫星与频率")
                                 return
                             # 轻量级绘制
                             vals = cmc_results[sat_prn][freq]['cmc_m']
-                            epochs = list(range(1, len(vals)+1))
-                            plt.figure(figsize=(12,6))
+                            epochs = list(range(1, len(vals) + 1))
+                            plt.figure(figsize=(12, 6))
                             plt.plot(epochs, vals, 'b-', label='CMC (m)')
                             plt.axhline(0, color='k', linestyle='--', alpha=0.4)
-                            plt.xlabel('历元'); plt.ylabel('CMC (m)'); plt.title(f'{sat_prn}-{freq} 接收机CMC')
-                            plt.grid(True, alpha=0.3); plt.legend(); plt.tight_layout(); plt.show()
-                        
+                            plt.xlabel('历元')
+                            plt.ylabel('CMC (m)')
+                            plt.title(f'{sat_prn}-{freq} 接收机CMC')
+                            plt.grid(True, alpha=0.3)
+                            plt.legend()
+                            plt.tight_layout()
+                            plt.show()
+
                         elif chart_type == "isb_analysis":
                             # ISB分析（需要接收机文件）
                             if not rx_file_var.get():
                                 messagebox.showerror("错误", "ISB分析需要选择接收机RINEX文件")
                                 return
-                            
+
                             try:
                                 isb_results = analyzer.perform_complete_isb_analysis(rx_file_var.get())
                                 analyzer.plot_isb_analysis(isb_results, save=False)
@@ -7331,7 +7377,6 @@ def show_charts_window(parent):
                         return
                     analyzer.read_receiver_rinex_obs(base_path)
                     analyzer.calculate_receiver_cmc()
-
 
                 # 更新状态
                 charts_window.after(0, lambda: status_var.set("正在生成所有图表..."))
@@ -7603,12 +7648,16 @@ def show_charts_window(parent):
                                 for freq in cmc_results.get(sat_id, {}):
                                     try:
                                         vals = cmc_results[sat_id][freq]['cmc_m']
-                                        epochs = list(range(1, len(vals)+1))
-                                        plt.figure(figsize=(12,6))
+                                        epochs = list(range(1, len(vals) + 1))
+                                        plt.figure(figsize=(12, 6))
                                         plt.plot(epochs, vals, 'b-', label='CMC (m)')
                                         plt.axhline(0, color='k', linestyle='--', alpha=0.4)
-                                        plt.xlabel('历元'); plt.ylabel('CMC (m)'); plt.title(f'{sat_id}-{freq} 接收机CMC')
-                                        plt.grid(True, alpha=0.3); plt.legend(); plt.tight_layout()
+                                        plt.xlabel('历元')
+                                        plt.ylabel('CMC (m)')
+                                        plt.title(f'{sat_id}-{freq} 接收机CMC')
+                                        plt.grid(True, alpha=0.3)
+                                        plt.legend()
+                                        plt.tight_layout()
                                         category_dir = os.path.join(analyzer.current_result_dir, 'receiver_cmc')
                                         os.makedirs(category_dir, exist_ok=True)
                                         out_path = os.path.join(category_dir, f"{sat_id}_{freq}_receiver_cmc.png")
@@ -7618,7 +7667,10 @@ def show_charts_window(parent):
                                         progress = 60 + (saved_charts / total_charts) * 30
                                         progress_var.set(int(progress))
                                         charts_window.update_idletasks()
-                                        import gc; gc.collect(); import time; time.sleep(0.05)
+                                        import gc
+                                        gc.collect()
+                                        import time
+                                        time.sleep(0.05)
                                     except Exception as e:
                                         print(f"保存{sat_id} {freq} CMC图表时出错: {str(e)}")
                                         continue
@@ -7694,7 +7746,7 @@ def show_chart_window(analyzer, data, chart_type, sat_prn, freq, auto_save):
     chart_window.title(f"图表显示 - {chart_type} - {sat_prn} - {freq}")
     chart_window.geometry("1000x700")
     chart_window.resizable(True, True)
-    
+
     # 居中显示窗口
     center_window(chart_window, 1000, 700)
 
@@ -7946,25 +7998,25 @@ def generate_phase_pred_errors_plot(analyzer, data, sat_prn, freq, fig):
 
     if sat_prn in phase_pred_errors and freq in phase_pred_errors[sat_prn]:
         error_data = phase_pred_errors[sat_prn][freq]
-        
+
         # 检查数据结构
         if 'prediction_error' in error_data and len(error_data['prediction_error']) > 0:
             # 提取误差值和时间
             error_values = error_data['prediction_error']
             times = error_data['times']
-            
+
             # 生成历元序号（从1开始）
             epochs = list(range(1, len(error_values) + 1))
-            
+
             # 绘制图表
             ax.plot(epochs, error_values, 'm-', label='相位预测误差', alpha=0.7)
-            
+
             ax.set_xlabel('历元')
             ax.set_ylabel('预测误差 (米)')
             ax.set_title(f'相位预测误差 - {sat_prn} - {freq}')
             ax.legend()
             ax.grid(True, alpha=0.3)
-            
+
             # 旋转x轴标签
             plt.setp(ax.get_xticklabels(), rotation=45)
         else:
@@ -8017,46 +8069,46 @@ def generate_isb_analysis_plot(analyzer, data, fig):
             ax.text(0.5, 0.5, "没有ISB分析结果，请先进行ISB分析",
                     ha='center', va='center', transform=ax.transAxes, fontsize=12)
             return
-        
+
         isb_results = analyzer.results['isb_analysis']
-        
+
         if not isb_results['isb_estimates']:
             fig.clear()
             ax = fig.add_subplot(111)
             ax.text(0.5, 0.5, "没有有效的ISB估计值",
                     ha='center', va='center', transform=ax.transAxes, fontsize=12)
             return
-        
+
         # 创建子图
         fig.clear()
         ax1 = fig.add_subplot(221)
         ax2 = fig.add_subplot(222)
         ax3 = fig.add_subplot(223)
         ax4 = fig.add_subplot(224)
-        
+
         # ISB时间序列
         isb_values = np.array(isb_results['isb_estimates'])
         epochs = isb_results['isb_epochs']
-        
+
         ax1.plot(epochs, isb_values, 'b-', linewidth=1, alpha=0.7, label='ISB时间序列')
-        ax1.axhline(y=isb_results['isb_mean'], color='r', linestyle='--', 
-                   label=f'均值: {isb_results["isb_mean"]:.3f}m')
+        ax1.axhline(y=isb_results['isb_mean'], color='r', linestyle='--',
+                    label=f'均值: {isb_results["isb_mean"]:.3f}m')
         ax1.set_xlabel('时间')
         ax1.set_ylabel('ISB (m)')
         ax1.set_title('ISB时间序列')
         ax1.legend()
         ax1.grid(True, alpha=0.3)
-        
+
         # ISB直方图
         ax2.hist(isb_values, bins=30, alpha=0.7, color='skyblue', edgecolor='black')
-        ax2.axvline(x=isb_results['isb_mean'], color='r', linestyle='--', linewidth=2, 
-                   label=f'均值: {isb_results["isb_mean"]:.3f}m')
+        ax2.axvline(x=isb_results['isb_mean'], color='r', linestyle='--', linewidth=2,
+                    label=f'均值: {isb_results["isb_mean"]:.3f}m')
         ax2.set_xlabel('ISB (m)')
         ax2.set_ylabel('频次')
         ax2.set_title('ISB分布直方图')
         ax2.legend()
         ax2.grid(True, alpha=0.3)
-        
+
         # ISB统计信息
         ax3.axis('off')
         stats_text = f"""ISB统计信息:
@@ -8067,12 +8119,12 @@ def generate_isb_analysis_plot(analyzer, data, fig):
 最大值: {np.max(isb_values):.3f} m
 有效历元数: {len(isb_values)}
 基准卫星: {isb_results['reference_satellite']}"""
-        
+
         ax3.text(0.05, 0.95, stats_text, transform=ax3.transAxes, fontsize=12,
-                verticalalignment='top', fontfamily='monospace',
-                bbox=dict(boxstyle='round,pad=0.5', facecolor='lightgray', alpha=0.8, 
-                         edgecolor='black', linewidth=1))
-        
+                 verticalalignment='top', fontfamily='monospace',
+                 bbox=dict(boxstyle='round,pad=0.5', facecolor='lightgray', alpha=0.8,
+                           edgecolor='black', linewidth=1))
+
         # ISB残差分析
         ax4.plot(epochs, isb_values - isb_results['isb_mean'], 'g-', linewidth=1, alpha=0.7)
         ax4.axhline(y=0, color='r', linestyle='-', linewidth=1)
@@ -8080,15 +8132,14 @@ def generate_isb_analysis_plot(analyzer, data, fig):
         ax4.set_ylabel('ISB 残差 (m)')
         ax4.set_title('ISB 残差时间序列')
         ax4.grid(True, alpha=0.3)
-        
+
         plt.tight_layout()
-        
+
     except Exception as e:
         fig.clear()
         ax = fig.add_subplot(111)
         ax.text(0.5, 0.5, f"生成ISB分析图表时出错：\n{str(e)}",
                 ha='center', va='center', transform=ax.transAxes, fontsize=12)
-
 
 
 def show_report_window(parent):
@@ -8099,7 +8150,7 @@ def show_report_window(parent):
     report_window.resizable(True, True)
     report_window.transient(parent)
     report_window.grab_set()
-    
+
     # 居中显示窗口
     center_window(report_window, 600, 500)
 
