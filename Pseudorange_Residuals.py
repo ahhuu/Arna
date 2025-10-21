@@ -11,7 +11,7 @@ FREQ_MAPPING = {
     'G': (['C1C', 'C5Q'], ['S1C', 'S5Q']),  # GPS
     'R': (['C1C'], ['S1C']),  # GLONASS
     'E': (['C1C', 'C5Q', 'C7Q'], ['S1C', 'S5Q', 'S7Q']),  # Galileo
-    'C': (['C2I'], ['S2I'])  # BDS
+    'C': (['C1P', 'C2I', 'C5P'], ['S1P', 'S2I', 'S5P'])  # BDS
 }
 
 
@@ -186,61 +186,75 @@ def read_rinex_obs(file_path, is_mobile, debug_list):
             data_values = obs_values
             values_per_obs = 1
         else:
-            # 接收机数据：空格分割+跳过质量指标
-            parts = re.split(r'\s+', line[3:].strip())
-            data_values = parts
-            values_per_obs = 2
+            # 接收机数据：使用固定宽度字段解析，与Rinex_analysis.py保持一致
+            sat_data = line[3:]  # 跳过PRN标识符
+            field_width = 16  # 每个字段16字符
+            expected_fields = len(obs_types)
+            actual_fields = (len(sat_data) + field_width - 1) // field_width
+            
+            def read_field(k):
+                """读取第k个字段的值（前14字符为数值）"""
+                if k >= expected_fields or k >= actual_fields:
+                    return None
+                start = k * field_width
+                end = start + field_width
+                field = sat_data[start:end]
+                value_str = field[:14].strip()  # 前14列为数值
+                try:
+                    return float(value_str) if value_str else None
+                except ValueError:
+                    return None
 
         for pr_type, snr_type in zip(pseudorange_types, snr_types):
             if pr_type not in obs_types or snr_type not in obs_types:
                 continue
 
-            pr_idx = obs_types.index(pr_type)
-            snr_idx = obs_types.index(snr_type)
-            pr_data_pos = pr_idx * values_per_obs
-            snr_data_pos = snr_idx * values_per_obs
+            if is_mobile:
+                # 手机数据：使用原来的逻辑
+                pr_idx = obs_types.index(pr_type)
+                snr_idx = obs_types.index(snr_type)
+                
+                pr_data_pos = pr_idx
+                snr_data_pos = snr_idx
+                
+                # 伪距提取
+                pr_val = None
+                if pr_data_pos < len(data_values):
+                    pr_val_str = data_values[pr_data_pos]
+                    if pr_val_str:
+                        try:
+                            pr_val = float(pr_val_str)
+                        except ValueError:
+                            debug_list.append({
+                                'device': device_type,
+                                'epoch': epoch,
+                                'prn': prn,
+                                'frequency': pr_type,
+                                'error': f'无法解析伪距值: {pr_val_str}'
+                            })
 
-            # 伪距提取
-            pr_val = None
-            if pr_data_pos < len(data_values):
-                pr_val_str = data_values[pr_data_pos]
-                if pr_val_str:
-                    try:
-                        pr_val = float(pr_val_str)
-                    except ValueError:
-                        debug_list.append({
-                            'device': device_type,
-                            'epoch': epoch,
-                            'prn': prn,
-                            'frequency': pr_type,
-                            'error': f'无法解析伪距值: {pr_val_str}'
-                        })
-
-            # 信噪比提取
-            snr_val = None
-            if snr_data_pos < len(data_values):
-                snr_val_str = data_values[snr_data_pos]
-                if snr_val_str:
-                    try:
-                        snr_val = float(snr_val_str)
-                        # 接收机特殊处理：跳过可能的SNR质量指标
-                        if not is_mobile and 0 < snr_val <= 9 and snr_data_pos + 1 < len(data_values):
-                            next_val_str = data_values[snr_data_pos + 1]
-                            if next_val_str:
-                                try:
-                                    next_val = float(next_val_str)
-                                    if 10 < next_val < 60:
-                                        snr_val = next_val
-                                except ValueError:
-                                    pass
-                    except ValueError:
-                        debug_list.append({
-                            'device': device_type,
-                            'epoch': epoch,
-                            'prn': prn,
-                            'frequency': pr_type,
-                            'error': f'无法解析SNR值: {snr_val_str}'
-                        })
+                # 信噪比提取
+                snr_val = None
+                if snr_data_pos < len(data_values):
+                    snr_val_str = data_values[snr_data_pos]
+                    if snr_val_str:
+                        try:
+                            snr_val = float(snr_val_str)
+                        except ValueError:
+                            debug_list.append({
+                                'device': device_type,
+                                'epoch': epoch,
+                                'prn': prn,
+                                'frequency': pr_type,
+                                'error': f'无法解析SNR值: {snr_val_str}'
+                            })
+            else:
+                # 接收机数据：使用固定宽度字段解析
+                pr_idx = obs_types.index(pr_type)
+                snr_idx = obs_types.index(snr_type)
+                
+                pr_val = read_field(pr_idx)
+                snr_val = read_field(snr_idx)
 
             # 调试信息
             if pr_val is not None and snr_val is not None:
