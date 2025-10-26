@@ -42,6 +42,15 @@ MAXPRRUNCMPS = 10   # Maximum pseudorange rate (Doppler) uncertainty, 10 m/s, fo
 MAXTOWUNCNS = 500   # Maximum Tow uncertainty, 500 ns, for example
 MAXADRUNCNS = 1     # Maximum ADR uncertainty, 1 m, for example
 
+# PDF方法：C/N0阈值过滤（暂时禁用）
+# CN0_THRESHOLD_GPS_L1 = 23.0    # GPS L1信号C/N0阈值 (dB-Hz)
+# CN0_THRESHOLD_GAL_L1 = 15.0    # Galileo L1信号C/N0阈值 (dB-Hz)
+# CN0_THRESHOLD_GENERAL = 20.0   # 其他信号的通用C/N0阈值 (dB-Hz)
+# CN0_THRESHOLD_SAFE = 30.0      # 安全C/N0阈值，避免低质量测量
+
+# PDF方法：相位调整阈值
+PHASE_CODE_DIFF_THRESHOLD = 50.0  # 码相差异阈值 (米)
+
 MAX_SYS = 10
 MAX_FRQ = 5
 
@@ -209,6 +218,9 @@ class RnxSat:
         self.l = [0.0] * MAX_FRQ
         self.d = [0.0] * MAX_FRQ
         self.s = [0.0] * MAX_FRQ
+        # PDF方法：添加IPA存储
+        self.ipa = [0] * MAX_FRQ  # 初始相位模糊度
+        self.first_observation = [True] * MAX_FRQ  # 标记是否为首次观测
 
 
 class RnxEpoch:
@@ -296,6 +308,69 @@ def latlonh_to_xyz(lat_deg, lon_deg, h_m):
     Z = (N * (1 - e_sq) + h_m) * math.sin(lat)
 
     return X, Y, Z
+
+
+# def check_cn0_threshold(sat):
+#     """PDF方法：检查C/N0阈值（暂时禁用）"""
+#     cn0 = sat.cn0_dbhz
+#     
+#     if sat.sys == SYS_GPS and round(sat.carrier_frequency_hz / 1e4) == 157542:  # GPS L1
+#         return cn0 >= CN0_THRESHOLD_GPS_L1
+#     elif sat.sys == SYS_GAL and round(sat.carrier_frequency_hz / 1e4) == 157542:  # Galileo L1
+#         return cn0 >= CN0_THRESHOLD_GAL_L1
+#     else:
+#         return cn0 >= CN0_THRESHOLD_GENERAL
+
+
+def check_multipath_indicator(sat):
+    """PDF方法：检查多径指示器"""
+    return sat.multipath_indicator == 0  # 0表示未检测到多径
+
+
+def check_phase_continuity(sat, prev_sat=None):
+    """PDF方法：检查相位连续性"""
+    if prev_sat is None:
+        return True  # 首次测量
+    
+    # 检查ADR状态
+    if sat.accumulated_delta_range_state & GPS_ADR_STATE_CYCLE_SLIP:
+        return False  # 检测到周跳
+    
+    if not (sat.accumulated_delta_range_state & GPS_ADR_STATE_VALID):
+        return False  # ADR状态无效
+    
+    if not (prev_sat.accumulated_delta_range_state & GPS_ADR_STATE_VALID):
+        return False  # 上一历元ADR状态无效
+    
+    return True
+
+
+def compute_adjusted_adr(sat, current_fbn, current_bn, initial_fbn, initial_bn):
+    """PDF方法：计算调整后的ADR"""
+    wavelength = CLIGHT / sat.carrier_frequency_hz
+    
+    # 计算FBN和BN的差异
+    fbn_diff = current_fbn - initial_fbn
+    bn_diff = current_bn - initial_bn
+    
+    # 调整ADR：ADR̃ = (1/λ) * ADR - (c/λ) * [(FBN(t) - FBN(t₀)) - (BN(t) - BN(t₀))]
+    adjusted_adr = (sat.accumulated_delta_range_meter / wavelength) - \
+                   (CLIGHT / wavelength) * (fbn_diff - bn_diff) * 1e-9
+    
+    return adjusted_adr
+
+
+def compute_initial_phase_ambiguity(pseudorange, adjusted_adr, wavelength):
+    """PDF方法：计算初始相位模糊度"""
+    # IPA = int[(1/λ) * (p - ADR̃)]
+    ipa = int((pseudorange - adjusted_adr * wavelength) / wavelength)
+    return ipa
+
+
+def compute_phase_range(ipa, adjusted_adr):
+    """PDF方法：计算相位范围"""
+    # φ = IPA + ADR̃
+    return ipa + adjusted_adr
 
 
 def gpstime2ymdhms(time_nano, full_bias_nano, bias_nano):
@@ -488,6 +563,12 @@ def main():
         try:
             logger.info(f"开始处理...")
             logger.info(f"读取原始文件: {os.path.basename(input_file)}")
+            logger.info("使用PDF方法进行GNSS观测处理：")
+            logger.info("- 每历元更新FBN和BN")
+            logger.info("- 多径检测")
+            logger.info("- 完整的相位观测计算（ADR调整+IPA机制）")
+            logger.info("- 相位连续性处理")
+            logger.info("- 码相差阈值检测")
 
             # 更新进度条和状态
             status_label.config(text=f"正在处理: {os.path.basename(input_file)}")
@@ -621,11 +702,30 @@ def main():
             count = -1
             rnx = []
             repoch = RnxEpoch()
+            
+            # PDF方法：每历元更新FBN的基准值
+            current_fbn = epochs[0].obs.full_bias_nano
+            current_bn = epochs[0].obs.bias_nano
+            initial_fbn = current_fbn
+            initial_bn = current_bn
+            
+            # 统计信息
+            total_observations = 0
+            rejected_cn0 = 0
+            rejected_multipath = 0
+            rejected_uncertainty = 0
+            rejected_time_uncertainty = 0
+            phase_discontinuities = 0
+            ipa_reinitializations = 0
 
             for epoch in epochs:
                 count += 1
                 sat = epoch.obs
                 allRxMillis = int((sat.time_nano - sat.full_bias_nano) * 1e-6)
+
+                # PDF方法：每历元更新FBN和BN
+                current_fbn = sat.full_bias_nano
+                current_bn = sat.bias_nano
 
                 # Anything within 1ms is considered same epoch
                 if abs(allRxMillis - allRxMillis_p) > NEAR_ZERO:
@@ -645,12 +745,18 @@ def main():
                         clkdiscp = False
                         epo_bias = count
                         logger.debug(f"更新时钟基准点为历元 #{epo_bias}")
+                        # 更新初始FBN和BN基准值
+                        initial_fbn = current_fbn
+                        initial_bn = current_bn
 
-                time = gpstime2ymdhms(sat.time_nano, epochs[epo_bias].obs.full_bias_nano,
-                                      epochs[epo_bias].obs.bias_nano)
+                # PDF方法：使用当前历元的FBN和BN计算时间
+                time = gpstime2ymdhms(sat.time_nano, current_fbn, current_bn)
                 repoch.time = time
 
-                # Check observation availability
+                # PDF方法：综合质量检查
+                total_observations += 1
+                
+                # 1. 基本状态检查
                 available = False
                 if sat.sys in [SYS_GPS, SYS_BDS, SYS_QZS]:
                     available = (sat.state & STATE_CODE_LOCK) and (sat.state & STATE_TOW_KNOWN)
@@ -666,9 +772,27 @@ def main():
                 if not available:
                     continue  # Reject bad observations with invalid state
 
+                # 2. PDF方法：C/N0阈值检查（暂时禁用）
+                # if not check_cn0_threshold(sat):
+                #     rejected_cn0 += 1
+                #     continue  # Reject low C/N0 measurements
+
+                # 3. PDF方法：多径检测
+                if not check_multipath_indicator(sat):
+                    rejected_multipath += 1
+                    continue  # Reject multipath-affected measurements
+
+                # 4. PDF方法：时间不确定性检查（getReceivedSvTimeUncertaintyNanos != 1 billion）
+                # 注意：某些芯片使用10^9纳秒标记不可靠测量（PDF方法）
+                if sat.received_sv_time_uncertainty_nano >= 1000000000:  # 1 billion nanoseconds
+                    rejected_time_uncertainty += 1
+                    continue  # Reject unreliable measurements
+
+                # 5. 不确定性阈值检查（高精度阈值）
                 if (sat.pseudorange_rate_uncertainty_meter_per_second > MAXPRRUNCMPS or
                         sat.received_sv_time_uncertainty_nano > MAXTOWUNCNS or
                         sat.accumulated_delta_range_uncertainty_meter > MAXADRUNCNS):
+                    rejected_uncertainty += 1
                     continue  # Reject bad observations
 
                 # Find existing satellite or create new one
@@ -692,30 +816,31 @@ def main():
                 wavl = CLIGHT / sat.carrier_frequency_hz  # Compute wavelength
                 wavl_inv = 1.0 / wavl
 
-                time_from_gps_start = sat.time_nano - epochs[epo_bias].obs.full_bias_nano + int(sat.time_offset_nano)
+                # PDF方法：使用当前历元的FBN和BN计算时间
+                time_from_gps_start = sat.time_nano - current_fbn + int(sat.time_offset_nano)
 
                 # Time of reception calculation
                 receive_second = 0
                 send_second = sat.received_sv_time_nano
 
                 if sat.sys == SYS_GPS:
-                    WeekNonano = int((-sat.full_bias_nano * 1e-9) // 604800)
+                    WeekNonano = int((-current_fbn * 1e-9) // 604800)
                     receive_second = time_from_gps_start - WeekNonano * 604800 * 10 ** 9
                 elif sat.sys == SYS_GLO:
-                    DayNonano = int((-sat.full_bias_nano) // (86400.00 * 10 ** 9)) * int(86400.00 * 10 ** 9)
+                    DayNonano = int((-current_fbn) // (86400.00 * 10 ** 9)) * int(86400.00 * 10 ** 9)
                     receive_second = time_from_gps_start - DayNonano + (3 * 3600 - LeapSecond) * 10 ** 9
                 elif sat.sys == SYS_BDS:
-                    WeekNonano = int((-sat.full_bias_nano * 1e-9) // 604800)
+                    WeekNonano = int((-current_fbn * 1e-9) // 604800)
                     receive_second = time_from_gps_start - WeekNonano * 604800 * 10 ** 9 - 14 * 10 ** 9
                 elif sat.sys == SYS_GAL:
-                    WeekNonano = int((-sat.full_bias_nano * 1e-9) // 604800)
+                    WeekNonano = int((-current_fbn * 1e-9) // 604800)
                     receive_second = time_from_gps_start - WeekNonano * 604800 * 10 ** 9
                 elif sat.sys == SYS_QZS:
-                    WeekNonano = int((-sat.full_bias_nano * 1e-9) // 604800)
+                    WeekNonano = int((-current_fbn * 1e-9) // 604800)
                     receive_second = time_from_gps_start - WeekNonano * 604800 * 10 ** 9
 
                 # Time difference between reception and transmission
-                pr_second = (receive_second - send_second) * 1e-9 - epochs[epo_bias].obs.bias_nano * 1e-9
+                pr_second = (receive_second - send_second) * 1e-9 - current_bn * 1e-9
 
                 # Check for week rollover
                 if pr_second > 604800 / 2:
@@ -737,12 +862,45 @@ def main():
                 if sat.sys == SYS_GLO and sat.svid > 80:
                     continue  # Delete odd GLONASS numbers > 80
 
+                # PDF方法：计算伪距
+                pseudorange = pr_second * CLIGHT
+
+                # PDF方法：计算调整后的ADR
+                adjusted_adr = compute_adjusted_adr(sat, current_fbn, current_bn, initial_fbn, initial_bn)
+
+                # PDF方法：相位连续性检查
+                if not check_phase_continuity(sat):
+                    phase_discontinuities += 1
+                    logger.debug(f"相位不连续检测到，卫星 {sat.svid}")
+                    existing_sat.first_observation[frq] = True  # 重新初始化
+
+                # PDF方法：计算相位观测
+                if existing_sat.first_observation[frq]:
+                    # 首次观测：计算IPA
+                    existing_sat.ipa[frq] = compute_initial_phase_ambiguity(pseudorange, adjusted_adr, wavl)
+                    existing_sat.first_observation[frq] = False
+                    logger.debug(f"首次观测卫星 {sat.svid}，IPA = {existing_sat.ipa[frq]}")
+                else:
+                    # 检查码相差异是否需要重新初始化IPA
+                    phase_range = compute_phase_range(existing_sat.ipa[frq], adjusted_adr)
+                    phase_meters = phase_range * wavl
+                    code_phase_diff = abs(pseudorange - phase_meters)
+                    
+                    if code_phase_diff > PHASE_CODE_DIFF_THRESHOLD:
+                        ipa_reinitializations += 1
+                        logger.debug(f"码相差异过大 ({code_phase_diff:.2f}m)，重新初始化IPA")
+                        existing_sat.ipa[frq] = compute_initial_phase_ambiguity(pseudorange, adjusted_adr, wavl)
+
+                # PDF方法：计算最终相位观测
+                phase_range = compute_phase_range(existing_sat.ipa[frq], adjusted_adr)
+
                 # Store observations
-                existing_sat.p[frq] = pr_second * CLIGHT  # Pseudorange
+                existing_sat.p[frq] = pseudorange  # Pseudorange
                 existing_sat.d[frq] = -sat.pseudorange_rate_meter_per_second * wavl_inv  # Doppler
-                existing_sat.l[frq] = sat.accumulated_delta_range_meter * wavl_inv  # Carrier phase
+                existing_sat.l[frq] = phase_range  # Carrier phase in cycles
                 existing_sat.s[frq] = sat.cn0_dbhz  # C/N0
 
+                # PDF方法：检查ADR状态
                 if sat.accumulated_delta_range_state & GPS_ADR_STATE_UNKNOWN:
                     existing_sat.l[frq] = 0
 
@@ -773,6 +931,18 @@ def main():
                         print_rnx_epoch(fpw, epoch)
 
                 logger.info(f"RINEX3.05文件生成完成，共写入 {len(rnx)} 个历元")
+                
+                # PDF方法：输出统计信息
+                logger.info("=== PDF方法处理统计 ===")
+                logger.info(f"总观测数: {total_observations}")
+                # logger.info(f"因C/N0阈值拒绝: {rejected_cn0} ({rejected_cn0/total_observations*100:.1f}%)")
+                logger.info(f"因多径检测拒绝: {rejected_multipath} ({rejected_multipath/total_observations*100:.1f}%)")
+                logger.info(f"因不确定性阈值拒绝: {rejected_uncertainty} ({rejected_uncertainty/total_observations*100:.1f}%)")
+                logger.info(f"因时间不确定性拒绝: {rejected_time_uncertainty} ({rejected_time_uncertainty/total_observations*100:.1f}%)")
+                logger.info(f"相位不连续检测: {phase_discontinuities}")
+                logger.info(f"IPA重新初始化: {ipa_reinitializations}")
+                logger.info(f"时钟跳变次数: {clock_jump_count}")
+                
                 logger.info(f"文件 {os.path.basename(input_file)} 处理完成!")
                 print("===============================================================================================")
 
