@@ -3218,6 +3218,7 @@ class GNSSAnalyzer:
         返回:
             剔除后的文件路径
         """
+        enable_cci = getattr(self, 'enable_cci_processing', True)
         self.start_stage(6, "基于伪距相位差值剔除异常观测值", 100)
 
         # 确保已经计算了伪距相位差值
@@ -3280,14 +3281,17 @@ class GNSSAnalyzer:
         phone_file_name_no_ext = os.path.splitext(phone_file_name)[0]
         phone_result_dir = os.path.join("results", phone_file_name_no_ext)
 
-        # 检查是否存在CCI处理后的文件
-        cci_dir = os.path.join(phone_result_dir, "code-carrier inconsistency")
-        cci_file_name = f"{phone_file_name_no_ext}-cc inconsistency.25o"
-        cci_file_path = os.path.join(cci_dir, cci_file_name)
+        # 检查是否存在CCI处理后的文件（仅在启用了CCI处理时）
+        if enable_cci:
+            cci_dir = os.path.join(phone_result_dir, "code-carrier inconsistency")
+            cci_file_name = f"{phone_file_name_no_ext}-cc inconsistency.25o"
+            cci_file_path = os.path.join(cci_dir, cci_file_name)
 
-        if os.path.exists(cci_file_path):
-            input_file_path = cci_file_path
-            log_content.append(f"使用CCI处理后的文件: {cci_file_name}\n")
+            if os.path.exists(cci_file_path):
+                input_file_path = cci_file_path
+                log_content.append(f"使用CCI处理后的文件: {cci_file_name}\n")
+            else:
+                log_content.append(f"使用原始文件: {phone_file_name}\n")
         else:
             log_content.append(f"使用原始文件: {phone_file_name}\n")
 
@@ -3425,9 +3429,12 @@ class GNSSAnalyzer:
         if not os.path.exists(coarse_error_dir):
             os.makedirs(coarse_error_dir)
 
-        # 使用CCI处理后的文件名作为基础
-        cci_file_name = f"{phone_file_name_no_ext}-cc inconsistency.25o"
-        cleaned_file_name = f"cleaned1-{cci_file_name}"
+        # 根据是否启用CCI处理决定文件名
+        if enable_cci:
+            base_file_name = f"{phone_file_name_no_ext}-cc inconsistency.25o"
+        else:
+            base_file_name = f"{phone_file_name_no_ext}.25o"
+        cleaned_file_name = f"cleaned1-{base_file_name}"
         output_path = os.path.join(coarse_error_dir, cleaned_file_name)
 
         with open(output_path, 'w', encoding='utf-8') as f:
@@ -4914,7 +4921,14 @@ to
             phone_file_name_no_ext = os.path.splitext(phone_file_name)[0]
             phone_result_dir = os.path.join("results", phone_file_name_no_ext)
             coarse_error_dir = os.path.join(phone_result_dir, "Coarse error")
-            cci_file_name = f"{phone_file_name_no_ext}-cc inconsistency.25o"
+            
+            # 根据是否启用CCI处理决定文件名
+            enable_cci = getattr(self, 'enable_cci_processing', True)
+            if enable_cci:
+                cci_file_name = f"{phone_file_name_no_ext}-cc inconsistency.25o"
+            else:
+                cci_file_name = f"{phone_file_name_no_ext}.25o"
+            
             cleaned2_file_name = f"cleaned2-{cci_file_name}"
             cleaned2_file_path = os.path.join(coarse_error_dir, cleaned2_file_name)
 
@@ -5180,7 +5194,12 @@ to
     def remove_outliers_and_save(self, double_diffs, triple_errors):
         """
         基于伪距、相位、多普勒双差检测结果，修改RINEX文件中的异常观测值
+        
+        参数:
+            double_diffs: 双差数据
+            triple_errors: 三倍中误差数据
         """
+        enable_cci = getattr(self, 'enable_cci_processing', True)
         # 各观测类型的最大阈值限制（使用用户设置的值）
         max_threshold_limit = self.max_threshold_limits
 
@@ -5227,7 +5246,10 @@ to
 
         # 检查是否存在基于伪距相位差值剔除后的文件
         coarse_error_dir = os.path.join(phone_result_dir, "Coarse error")
-        cci_file_name = f"{phone_file_name_no_ext}-cc inconsistency.25o"
+        if enable_cci:
+            cci_file_name = f"{phone_file_name_no_ext}-cc inconsistency.25o"
+        else:
+            cci_file_name = f"{phone_file_name_no_ext}.25o"
         cleaned_file_name = f"cleaned1-{cci_file_name}"
         cleaned_file_path = os.path.join(coarse_error_dir, cleaned_file_name)
 
@@ -5394,7 +5416,11 @@ to
                 satellite_modify_details.append("")
 
         # 7. 保存修改后的文件
-        modified_file_name = f"cleaned2-{cci_file_name}"
+        if enable_cci:
+            base_name = f"{phone_file_name_no_ext}-cc inconsistency.25o"
+        else:
+            base_name = f"{phone_file_name_no_ext}.25o"
+        modified_file_name = f"cleaned2-{base_name}"
         output_path = os.path.join(coarse_error_dir, modified_file_name)
 
         with open(output_path, 'w', encoding='utf-8') as f:
@@ -6317,7 +6343,7 @@ def main():
     desc_frame = ttk.LabelFrame(main_frame, text="功能说明", padding="20")
     desc_frame.pack(fill=tk.X, pady=20)
 
-    ttk.Label(desc_frame, text="• 预处理：码相不一致性建模和校正→CMC变化阈值剔除→历元间双差剔除→BDS-2/3 ISB分析校正",
+    ttk.Label(desc_frame, text="• 预处理：码相不一致性(CCI)建模校正→CMC变化阈值剔除→历元间双差剔除→ISB分析校正",
               font=("Microsoft YaHei", 10)).pack(anchor=tk.W, pady=2)
     ttk.Label(desc_frame, text="• BDS2/3 ISB分析：单独进行北斗二号与三号系统间偏差分析",
               font=("Microsoft YaHei", 10)).pack(anchor=tk.W, pady=2)
@@ -6373,13 +6399,13 @@ def show_cleaning_window(parent):
     """显示数据预处理功能窗口"""
     cleaning_window = tk.Toplevel(parent)
     cleaning_window.title("数据预处理")
-    cleaning_window.geometry("700x700")
+    cleaning_window.geometry("700x800")
     cleaning_window.resizable(True, True)
     cleaning_window.transient(parent)
     cleaning_window.grab_set()
 
     # 居中显示窗口
-    center_window(cleaning_window, 700, 700)
+    center_window(cleaning_window, 700, 800)
 
     # 主框架
     main_frame = ttk.Frame(cleaning_window, padding="20")
@@ -6416,7 +6442,7 @@ def show_cleaning_window(parent):
     receiver_frame = ttk.Frame(file_frame)
     receiver_frame.pack(fill=tk.X, pady=5)
 
-    ttk.Label(receiver_frame, text="接收机RINEX文件(ISB分析必需):").pack(side=tk.LEFT)
+    ttk.Label(receiver_frame, text="接收机RINEX文件(CCI建模和ISB分析必需):").pack(side=tk.LEFT)
     receiver_file_var = tk.StringVar()
     receiver_file_entry = ttk.Entry(receiver_frame, textvariable=receiver_file_var, width=50)
     receiver_file_entry.pack(side=tk.LEFT, padx=(10, 10), fill=tk.X, expand=True)
@@ -6493,8 +6519,28 @@ def show_cleaning_window(parent):
     threshold_entry = ttk.Entry(threshold_frame, textvariable=threshold_var, width=10)
     threshold_entry.pack(side=tk.LEFT, padx=(10, 0))
 
+    # 可选处理设置
+    option_frame = ttk.LabelFrame(param_frame, text="可选处理", padding="5")
+    option_frame.pack(fill=tk.X, pady=5)
+
+    # 码相不一致性处理选项
+    cci_enable_var = tk.BooleanVar(value=True)
+    cci_enable_checkbox = ttk.Checkbutton(option_frame, text="启用码相不一致性(CCI)处理",
+                                          variable=cci_enable_var)
+    cci_enable_checkbox.pack(side=tk.LEFT)
+
+    ttk.Label(option_frame, text="(需要接收机文件作为基准，校正载波相位观测值)").pack(side=tk.LEFT, padx=(10, 20))
+
+    # ISB处理选项
+    isb_enable_var = tk.BooleanVar(value=True)
+    isb_enable_checkbox = ttk.Checkbutton(option_frame, text="启用ISB处理",
+                                          variable=isb_enable_var)
+    isb_enable_checkbox.pack(side=tk.LEFT)
+
+    ttk.Label(option_frame, text="(需要接收机文件作为基准，校正BDS系统间偏差)").pack(side=tk.LEFT, padx=(10, 0))
+
     # 码相不一致性处理参数设置
-    cci_frame = ttk.LabelFrame(param_frame, text="码相不一致性处理", padding="5")
+    cci_frame = ttk.LabelFrame(param_frame, text="码相不一致性处理参数", padding="5")
     cci_frame.pack(fill=tk.X, pady=5)
 
     # R方阈值和CV值阈值设置（同一行）
@@ -6527,7 +6573,7 @@ def show_cleaning_window(parent):
     ttk.Label(phone_only_frame, text="(检测手机独有卫星的码相不一致性)").pack(side=tk.LEFT, padx=(10, 0))
 
     # BDS-2/3 ISB处理参数设置
-    isb_frame = ttk.LabelFrame(param_frame, text="BDS-2/3 ISB处理", padding="5")
+    isb_frame = ttk.LabelFrame(param_frame, text="BDS-2/3 ISB处理参数", padding="5")
     isb_frame.pack(fill=tk.X, pady=5)
 
     # ISB分析说明
@@ -6638,6 +6684,15 @@ def show_cleaning_window(parent):
             tk.messagebox.showerror("错误", "请先选择数据文件")
             return
 
+        # 验证可选功能的选择
+        if cci_enable_var.get() and not receiver_file_var.get():
+            tk.messagebox.showerror("错误", "启用码相不一致性(CCI)处理需要选择接收机RINEX文件作为基准")
+            return
+        
+        if isb_enable_var.get() and not receiver_file_var.get():
+            tk.messagebox.showerror("错误", "启用ISB处理需要选择接收机RINEX文件作为基准")
+            return
+
         # 禁用按钮
         start_btn.config(state='disabled')
         select_btn.config(state='disabled')
@@ -6668,6 +6723,13 @@ def show_cleaning_window(parent):
                 # 设置手机独有卫星分析
                 analyzer.enable_phone_only_analysis = phone_only_var.get()
 
+                # 获取用户选择
+                enable_cci = cci_enable_var.get()
+                enable_isb = isb_enable_var.get()
+
+                # 设置是否启用CCI处理
+                analyzer.enable_cci_processing = enable_cci
+
                 # 更新状态
                 status_var.set("正在读取RINEX文件...")
                 progress_var.set(10)
@@ -6676,9 +6738,9 @@ def show_cleaning_window(parent):
                 # 读取文件
                 data = analyzer.read_rinex_obs(file_path)
 
-                # 步骤1: 码相不一致性建模和校正（如果提供了接收机文件）
+                # 步骤1: 码相不一致性建模和校正（如果启用且提供了接收机文件）
                 cci_results = None
-                if receiver_file_var.get():
+                if enable_cci and receiver_file_var.get():
                     status_var.set("正在进行码相不一致性建模和校正...")
                     progress_var.set(20)
                     cleaning_window.update_idletasks()
@@ -6722,9 +6784,9 @@ def show_cleaning_window(parent):
 
                 analyzer.remove_outliers_and_save(double_diffs, triple_errors)
 
-                # 步骤6: ISB分析（如果有接收机文件）
+                # 步骤6: ISB分析（如果启用且提供了接收机文件）
                 isb_results = None
-                if receiver_file_var.get():
+                if enable_isb and receiver_file_var.get():
                     try:
                         status_var.set("正在进行ISB分析...")
                         progress_var.set(85)
@@ -6749,14 +6811,35 @@ def show_cleaning_window(parent):
 
                 # 显示处理步骤完成情况
                 message += "\n\n处理步骤完成情况："
-                message += "\n1. ✓ 码相不一致性建模和校正（如有接收机文件）"
-                message += "\n2. ✓ 伪距相位差值计算"
-                message += "\n3. ✓ 第一阶段剔除（CMC变化阈值）"
-                message += "\n4. ✓ 历元间双差计算"
-                message += "\n5. ✓ 第二阶段剔除（双差阈值）"
-                message += "\n6. ✓ ISB分析（如有接收机文件）"
+                step_num = 1
+                
+                # 步骤1: 码相不一致性建模和校正
+                if enable_cci and receiver_file_var.get() and cci_results:
+                    message += f"\n{step_num}. ✓ 码相不一致性建模和校正"
+                    step_num += 1
+                
+                # 步骤2: 伪距相位差值计算
+                message += f"\n{step_num}. ✓ 伪距相位差值计算"
+                step_num += 1
+                
+                # 步骤3: 第一阶段剔除（CMC变化阈值）
+                message += f"\n{step_num}. ✓ 第一阶段剔除（CMC变化阈值）"
+                step_num += 1
+                
+                # 步骤4: 历元间双差计算
+                message += f"\n{step_num}. ✓ 历元间双差计算"
+                step_num += 1
+                
+                # 步骤5: 第二阶段剔除（双差阈值）
+                message += f"\n{step_num}. ✓ 第二阶段剔除（双差阈值）"
+                step_num += 1
+                
+                # 步骤6: ISB分析
+                if enable_isb and receiver_file_var.get() and isb_results:
+                    message += f"\n{step_num}. ✓ ISB分析"
+                    step_num += 1
 
-                if receiver_file_var.get() and cci_results:
+                if enable_cci and receiver_file_var.get() and cci_results:
                     # 显示码相不一致性建模和校正的实际文件路径
                     corrected_file_path = cci_results.get('corrected_rinex_path', '')
                     if corrected_file_path:
@@ -6764,7 +6847,7 @@ def show_cleaning_window(parent):
                     else:
                         message += "\n\n码相不一致性建模和校正已完成"
 
-                if isb_results:
+                if enable_isb and isb_results:
                     # 显示ISB分析结果
                     isb_mean = isb_results.get('isb_mean', 0)
                     isb_std = isb_results.get('isb_std', 0)
