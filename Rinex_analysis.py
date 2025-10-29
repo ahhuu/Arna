@@ -3,6 +3,7 @@ import datetime
 import numpy as np
 import pandas as pd
 import matplotlib
+import bisect
 
 matplotlib.use('TkAgg')  # 使用Tkinter兼容的交互式后端
 import matplotlib.pyplot as plt
@@ -47,6 +48,8 @@ class GNSSAnalyzer:
             'phase': 1.5,  # 相位（米）
             'doppler': 5.0  # 多普勒（米/秒）
         }
+        # ISB分析时间戳索引缓存（用于性能优化）
+        self._isb_time_index_cache = {}
         # 手机独有卫星分析配置
         self.enable_phone_only_analysis = False  # 是否启用手机独有卫星分析
         self.phone_only_min_data_points = 20  # 手机独有卫星最小数据点数
@@ -3682,6 +3685,79 @@ class GNSSAnalyzer:
         self.results['triple_median_errors'] = triple_errors
         return triple_errors
 
+    def _find_closest_time_index(self, sorted_times, target_time, tolerance=0.1):
+        """使用二分查找找到最接近目标时间的索引（优化版本）"""
+        if not sorted_times:
+            return None, float('inf')
+        
+        # 将时间转换为时间戳用于比较
+        target_ts = target_time.timestamp() if hasattr(target_time, 'timestamp') else target_time
+        
+        # 使用二分查找找到插入位置
+        time_list = [t.timestamp() if hasattr(t, 'timestamp') else t for t in sorted_times]
+        pos = bisect.bisect_left(time_list, target_ts)
+        
+        # 检查左右两侧的最接近值
+        candidates = []
+        if pos < len(time_list):
+            candidates.append((pos, abs(time_list[pos] - target_ts)))
+        if pos > 0:
+            candidates.append((pos - 1, abs(time_list[pos - 1] - target_ts)))
+        
+        if not candidates:
+            return None, float('inf')
+        
+        # 找到最接近的索引
+        closest_idx, min_diff = min(candidates, key=lambda x: x[1])
+        
+        if min_diff <= tolerance:
+            return closest_idx, min_diff
+        else:
+            return None, min_diff
+
+    def _match_time_stamps_fast(self, phone_times, receiver_times, tolerance=0.1):
+        """快速匹配时间戳（优化版本，使用排序和二分查找）"""
+        if not phone_times or not receiver_times:
+            return []
+        
+        # 排序时间戳列表
+        phone_times_sorted = sorted(phone_times)
+        receiver_times_sorted = sorted(receiver_times)
+        
+        # 将接收机时间戳转换为字典以快速查找
+        receiver_time_map = {}
+        for rt in receiver_times_sorted:
+            rt_ts = rt.timestamp() if hasattr(rt, 'timestamp') else rt
+            receiver_time_map[rt_ts] = rt
+        
+        receiver_ts_list = sorted(receiver_time_map.keys())
+        
+        common_times = []
+        used_receiver_indices = set()
+        
+        for phone_time in phone_times_sorted:
+            phone_ts = phone_time.timestamp() if hasattr(phone_time, 'timestamp') else phone_time
+            
+            # 使用二分查找找到最接近的接收机时间戳
+            pos = bisect.bisect_left(receiver_ts_list, phone_ts)
+            
+            # 检查左右两侧
+            closest_idx = None
+            min_diff = float('inf')
+            
+            for check_pos in [pos, pos - 1]:
+                if 0 <= check_pos < len(receiver_ts_list):
+                    diff = abs(receiver_ts_list[check_pos] - phone_ts)
+                    if diff < min_diff and diff <= tolerance and check_pos not in used_receiver_indices:
+                        min_diff = diff
+                        closest_idx = check_pos
+            
+            if closest_idx is not None:
+                common_times.append(phone_time)
+                used_receiver_indices.add(closest_idx)
+        
+        return common_times
+
     def prepare_isb_data(self, receiver_rinex_path: str = None) -> Dict:
         """准备ISB计算所需的数据：时间戳对齐、BDS卫星识别和分类"""
         self.start_stage(6, "准备ISB计算数据", 100)
@@ -3745,19 +3821,15 @@ class GNSSAnalyzer:
 
         self.update_progress(30)
 
-        # 找到共同时间戳（允许小的时间差）
+        # 找到共同时间戳（允许小的时间差）- 使用优化算法
         print("开始时间戳匹配...")
-        common_times = []
         time_tolerance = 0.1  # 0.1秒容差，参照码相不一致处理
 
-        match_count = 0
-        for phone_time in phone_times:
-            for receiver_time in receiver_times:
-                time_diff = abs((phone_time - receiver_time).total_seconds())
-                if time_diff < time_tolerance:
-                    common_times.append(phone_time)
-                    match_count += 1
-                    break
+        # 转换为列表进行快速匹配
+        phone_times_list = list(phone_times)
+        receiver_times_list = list(receiver_times)
+        
+        common_times = self._match_time_stamps_fast(phone_times_list, receiver_times_list, time_tolerance)
 
         print(f"时间戳匹配结果: 找到 {len(common_times)} 个共同时间戳")
 
@@ -3863,27 +3935,25 @@ class GNSSAnalyzer:
         times = freq_data['times']
         snr_values = freq_data.get('snr', [])
 
-        # 计算在共同时间段内的覆盖率
+        # 计算在共同时间段内的覆盖率（使用优化的查找方法）
         covered_times = 0
         valid_observations = 0
-
+        
+        # 排序时间列表以使用二分查找
+        sorted_times = sorted(times)
+        # 创建时间到索引的映射（保持原始索引）
+        time_to_idx = {t: i for i, t in enumerate(times)}
+        
         for common_time in common_times:
-            # 找到最接近的时间戳
-            closest_time = None
-            min_diff = float('inf')
-
-            for i, time in enumerate(times):
-                diff = abs((time - common_time).total_seconds())
-                if diff < min_diff:
-                    min_diff = diff
-                    closest_time = time
-                    closest_idx = i
-
-            if min_diff <= 0.1:  # 0.1秒容差
+            closest_idx, min_diff = self._find_closest_time_index(sorted_times, common_time, tolerance=0.1)
+            if closest_idx is not None:
                 covered_times += 1
+                # 获取原始索引
+                closest_time_obj = sorted_times[closest_idx]
+                original_idx = time_to_idx[closest_time_obj]
                 # 检查信噪比
-                if closest_idx < len(snr_values) and snr_values[closest_idx] is not None:
-                    if snr_values[closest_idx] >= min_snr:
+                if original_idx < len(snr_values) and snr_values[original_idx] is not None:
+                    if snr_values[original_idx] >= min_snr:
                         valid_observations += 1
 
         coverage = covered_times / len(common_times) if common_times else 0
@@ -4021,16 +4091,18 @@ class GNSSAnalyzer:
         }
 
     def _calculate_coverage(self, times: list, common_times: list) -> float:
-        """计算在共同时间段内的覆盖率"""
+        """计算在共同时间段内的覆盖率（优化版本，使用二分查找）"""
         if not times or not common_times:
             return 0.0
 
+        # 排序时间列表以使用二分查找
+        sorted_times = sorted(times)
         coverage = 0
+        
         for common_time in common_times:
-            for time in times:
-                if abs((time - common_time).total_seconds()) <= 0.1:
-                    coverage += 1
-                    break
+            closest_idx, min_diff = self._find_closest_time_index(sorted_times, common_time, tolerance=0.1)
+            if closest_idx is not None:
+                coverage += 1
 
         return coverage / len(common_times) if common_times else 0.0
 
@@ -4062,29 +4134,27 @@ class GNSSAnalyzer:
         if not times or not code_values:
             return False
 
-        # 计算在共同时间段内的覆盖率
+        # 计算在共同时间段内的覆盖率（使用优化的查找方法）
         covered_times = 0
         valid_observations = 0
         snr_sum = 0
         snr_count = 0
+        
+        # 排序时间列表以使用二分查找
+        sorted_times = sorted(times)
+        # 创建时间到索引的映射（保持原始索引）
+        time_to_idx = {t: i for i, t in enumerate(times)}
 
         for common_time in common_times:
-            # 找到最接近的时间戳
-            closest_time = None
-            min_diff = float('inf')
-
-            for i, time in enumerate(times):
-                diff = abs((time - common_time).total_seconds())
-                if diff < min_diff:
-                    min_diff = diff
-                    closest_time = time
-                    closest_idx = i
-
-            if min_diff <= 0.1:  # 0.1秒容差
+            closest_idx, min_diff = self._find_closest_time_index(sorted_times, common_time, tolerance=0.1)
+            if closest_idx is not None:
                 covered_times += 1
+                # 获取原始索引
+                closest_time_obj = sorted_times[closest_idx]
+                original_idx = time_to_idx[closest_time_obj]
                 # 检查信噪比
-                if closest_idx < len(snr_values) and snr_values[closest_idx] is not None:
-                    snr_val = snr_values[closest_idx]
+                if original_idx < len(snr_values) and snr_values[original_idx] is not None:
+                    snr_val = snr_values[original_idx]
                     snr_sum += snr_val
                     snr_count += 1
                     if snr_val >= min_snr:
@@ -4215,33 +4285,29 @@ class GNSSAnalyzer:
 
     def _check_data_stability(self, times: list, snr_values: list, common_times: list, min_snr: float,
                               max_gap_seconds: float) -> bool:
-        """检查数据稳定性"""
-        # 计算覆盖率
+        """检查数据稳定性（优化版本，使用二分查找）"""
+        # 计算覆盖率（使用优化的查找方法）
         covered_times = 0
         valid_observations = 0
+        
+        # 排序时间列表以使用二分查找
+        sorted_times = sorted(times)
+        time_to_idx = {t: i for i, t in enumerate(times)}
 
         for common_time in common_times:
-            closest_time = None
-            min_diff = float('inf')
-            closest_idx = -1
-
-            for i, time in enumerate(times):
-                diff = abs((time - common_time).total_seconds())
-                if diff < min_diff:
-                    min_diff = diff
-                    closest_time = time
-                    closest_idx = i
-
-            if min_diff <= 0.1:  # 0.1秒容差
+            closest_idx, min_diff = self._find_closest_time_index(sorted_times, common_time, tolerance=0.1)
+            if closest_idx is not None:
                 covered_times += 1
-                if closest_idx < len(snr_values) and snr_values[closest_idx] is not None:
-                    if snr_values[closest_idx] >= min_snr:
+                closest_time_obj = sorted_times[closest_idx]
+                original_idx = time_to_idx[closest_time_obj]
+                if original_idx < len(snr_values) and snr_values[original_idx] is not None:
+                    if snr_values[original_idx] >= min_snr:
                         valid_observations += 1
 
         coverage = covered_times / len(common_times) if common_times else 0
         valid_ratio = valid_observations / covered_times if covered_times > 0 else 0
 
-        # 检查最大连续缺失时间
+        # 检查最大连续缺失时间（使用优化的查找方法）
         max_gap = 0
         current_gap = 0
 
@@ -4249,12 +4315,9 @@ class GNSSAnalyzer:
             current_time = common_times[i]
             next_time = common_times[i + 1]
 
-            # 检查当前时间是否有观测
-            has_obs = False
-            for time in times:
-                if abs((time - current_time).total_seconds()) <= 0.1:
-                    has_obs = True
-                    break
+            # 检查当前时间是否有观测（使用优化的查找）
+            closest_idx, _ = self._find_closest_time_index(sorted_times, current_time, tolerance=0.1)
+            has_obs = closest_idx is not None
 
             if has_obs:
                 current_gap = 0
@@ -4297,6 +4360,36 @@ class GNSSAnalyzer:
 
         self.update_progress(10)
 
+        # 预先为所有卫星建立时间戳索引（性能优化）
+        print("正在建立时间戳索引...")
+        all_sats = stable_bds2 + stable_bds3
+        time_index_maps = {}  # 存储每个卫星的时间索引映射
+        
+        for sat_id in all_sats:
+            # 手机数据索引
+            if sat_id in phone_data and 'L2I' in phone_data[sat_id]:
+                phone_times = phone_data[sat_id]['L2I']['times']
+                sorted_phone_times = sorted(phone_times)
+                phone_time_to_idx = {t: i for i, t in enumerate(phone_times)}
+                time_index_maps[f"{sat_id}_phone"] = {
+                    'sorted_times': sorted_phone_times,
+                    'time_to_idx': phone_time_to_idx,
+                    'code_values': phone_data[sat_id]['L2I'].get('code', [])
+                }
+            
+            # 接收机数据索引
+            if sat_id in receiver_data and 'L2I' in receiver_data[sat_id]:
+                receiver_times = receiver_data[sat_id]['L2I']['times']
+                sorted_receiver_times = sorted(receiver_times)
+                receiver_time_to_idx = {t: i for i, t in enumerate(receiver_times)}
+                time_index_maps[f"{sat_id}_receiver"] = {
+                    'sorted_times': sorted_receiver_times,
+                    'time_to_idx': receiver_time_to_idx,
+                    'code_values': receiver_data[sat_id]['L2I'].get('code', [])
+                }
+        
+        print(f"已为 {len(all_sats)} 颗卫星建立时间戳索引")
+
         # 计算每个历元的双差和ISB
         valid_epochs = 0
 
@@ -4304,9 +4397,29 @@ class GNSSAnalyzer:
             if epoch_idx % 100 == 0:
                 self.update_progress(10 + int(epoch_idx / len(common_times) * 80))
 
-            # 获取基准卫星的观测值
-            ref_phone_pr = self._get_pseudorange_at_time(phone_data, reference_sat, 'L2I', epoch_time)
-            ref_receiver_pr = self._get_pseudorange_at_time(receiver_data, reference_sat, 'L2I', epoch_time)
+            # 获取基准卫星的观测值（使用预建立的索引）
+            ref_phone_key = f"{reference_sat}_phone"
+            ref_receiver_key = f"{reference_sat}_receiver"
+            
+            ref_phone_pr = None
+            if ref_phone_key in time_index_maps:
+                idx_map = time_index_maps[ref_phone_key]
+                closest_idx, _ = self._find_closest_time_index(idx_map['sorted_times'], epoch_time, tolerance=0.1)
+                if closest_idx is not None:
+                    closest_time_obj = idx_map['sorted_times'][closest_idx]
+                    original_idx = idx_map['time_to_idx'][closest_time_obj]
+                    if original_idx < len(idx_map['code_values']) and idx_map['code_values'][original_idx] is not None:
+                        ref_phone_pr = idx_map['code_values'][original_idx]
+            
+            ref_receiver_pr = None
+            if ref_receiver_key in time_index_maps:
+                idx_map = time_index_maps[ref_receiver_key]
+                closest_idx, _ = self._find_closest_time_index(idx_map['sorted_times'], epoch_time, tolerance=0.1)
+                if closest_idx is not None:
+                    closest_time_obj = idx_map['sorted_times'][closest_idx]
+                    original_idx = idx_map['time_to_idx'][closest_time_obj]
+                    if original_idx < len(idx_map['code_values']) and idx_map['code_values'][original_idx] is not None:
+                        ref_receiver_pr = idx_map['code_values'][original_idx]
 
             if ref_phone_pr is None or ref_receiver_pr is None:
                 continue
@@ -4315,14 +4428,33 @@ class GNSSAnalyzer:
             epoch_double_diffs = {}
 
             # 计算所有卫星与基准卫星的单差
-            all_sats = stable_bds2 + stable_bds3
             for sat_id in all_sats:
                 if sat_id == reference_sat:
                     continue
 
-                # 获取当前卫星的观测值
-                sat_phone_pr = self._get_pseudorange_at_time(phone_data, sat_id, 'L2I', epoch_time)
-                sat_receiver_pr = self._get_pseudorange_at_time(receiver_data, sat_id, 'L2I', epoch_time)
+                # 获取当前卫星的观测值（使用预建立的索引）
+                sat_phone_key = f"{sat_id}_phone"
+                sat_receiver_key = f"{sat_id}_receiver"
+                
+                sat_phone_pr = None
+                if sat_phone_key in time_index_maps:
+                    idx_map = time_index_maps[sat_phone_key]
+                    closest_idx, _ = self._find_closest_time_index(idx_map['sorted_times'], epoch_time, tolerance=0.1)
+                    if closest_idx is not None:
+                        closest_time_obj = idx_map['sorted_times'][closest_idx]
+                        original_idx = idx_map['time_to_idx'][closest_time_obj]
+                        if original_idx < len(idx_map['code_values']) and idx_map['code_values'][original_idx] is not None:
+                            sat_phone_pr = idx_map['code_values'][original_idx]
+                
+                sat_receiver_pr = None
+                if sat_receiver_key in time_index_maps:
+                    idx_map = time_index_maps[sat_receiver_key]
+                    closest_idx, _ = self._find_closest_time_index(idx_map['sorted_times'], epoch_time, tolerance=0.1)
+                    if closest_idx is not None:
+                        closest_time_obj = idx_map['sorted_times'][closest_idx]
+                        original_idx = idx_map['time_to_idx'][closest_time_obj]
+                        if original_idx < len(idx_map['code_values']) and idx_map['code_values'][original_idx] is not None:
+                            sat_receiver_pr = idx_map['code_values'][original_idx]
 
                 if sat_phone_pr is None or sat_receiver_pr is None:
                     continue
@@ -4382,7 +4514,7 @@ class GNSSAnalyzer:
         return isb_results
 
     def _get_pseudorange_at_time(self, data: Dict, sat_id: str, freq: str, target_time: datetime.datetime) -> float:
-        """获取指定时间最接近的伪距观测值"""
+        """获取指定时间最接近的伪距观测值（优化版本，使用二分查找）"""
         if sat_id not in data or freq not in data[sat_id]:
             return None
 
@@ -4393,23 +4525,23 @@ class GNSSAnalyzer:
         if not times or not code_values:
             return None
 
-        # 找到最接近的时间戳
-        min_diff = float('inf')
-        closest_idx = -1
-
-        for i, time in enumerate(times):
-            diff = abs((time - target_time).total_seconds())
-            if diff < min_diff:
-                min_diff = diff
-                closest_idx = i
-
+        # 使用优化的查找方法
+        sorted_times = sorted(times)
+        time_to_idx = {t: i for i, t in enumerate(times)}
+        
+        closest_idx, min_diff = self._find_closest_time_index(sorted_times, target_time, tolerance=0.1)
+        
         # 如果时间差超过0.1秒，认为没有观测
-        if min_diff > 0.1:
+        if closest_idx is None:
             return None
 
+        # 获取原始索引
+        closest_time_obj = sorted_times[closest_idx]
+        original_idx = time_to_idx[closest_time_obj]
+
         # 返回对应的伪距观测值
-        if closest_idx < len(code_values) and code_values[closest_idx] is not None:
-            return code_values[closest_idx]
+        if original_idx < len(code_values) and code_values[original_idx] is not None:
+            return code_values[original_idx]
 
         return None
 
