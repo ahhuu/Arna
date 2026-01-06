@@ -17,9 +17,23 @@ from typing import Dict
 from collections import defaultdict
 
 # 导入分析脚本
-sys.path.append(os.path.join(os.path.dirname(__file__), 'tools', 'analysis_tools'))
-import Pseudorange_Residuals
-import SNR_Weighting
+import sys
+import importlib.util
+from pathlib import Path
+
+# 动态导入 Pseudorange_Residuals
+pr_path = Path(__file__).parent / 'tools' / 'analysis_tools' / 'Pseudorange_Residuals.py'
+pr_spec = importlib.util.spec_from_file_location("Pseudorange_Residuals", pr_path)
+Pseudorange_Residuals = importlib.util.module_from_spec(pr_spec)
+sys.modules["Pseudorange_Residuals"] = Pseudorange_Residuals
+pr_spec.loader.exec_module(Pseudorange_Residuals)
+
+# 动态导入 SNR_Weighting
+snr_path = Path(__file__).parent / 'tools' / 'analysis_tools' / 'SNR_Weighting.py'
+snr_spec = importlib.util.spec_from_file_location("SNR_Weighting", snr_path)
+SNR_Weighting = importlib.util.module_from_spec(snr_spec)
+sys.modules["SNR_Weighting"] = SNR_Weighting
+snr_spec.loader.exec_module(SNR_Weighting)
 
 # 设置中文字体（全局）
 plt.rcParams['font.sans-serif'] = ['Microsoft YaHei']
