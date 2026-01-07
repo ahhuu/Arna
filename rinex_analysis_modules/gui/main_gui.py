@@ -44,11 +44,8 @@ def center_window(window, width=None, height=None):
 def main():
     root = tk.Tk()
     root.title("GNSS数据分析器")
-    root.geometry("800x500")
+    root.geometry("750x500")
     root.resizable(True, True)
-
-    # 居中显示主窗口
-    center_window(root, 800, 500)
 
     # 创建主菜单栏
     menubar = tk.Menu(root)
@@ -82,9 +79,7 @@ def main():
     desc_frame = ttk.LabelFrame(main_frame, text="功能说明", padding="20")
     desc_frame.pack(fill=tk.X, pady=20)
 
-    ttk.Label(desc_frame, text="• 预处理：码相不一致性(CCI)建模校正→CMC变化阈值剔除→历元间双差剔除→ISB分析校正",
-              font=("Microsoft YaHei", 10)).pack(anchor=tk.W, pady=2)
-    ttk.Label(desc_frame, text="• BDS2/3 ISB分析：单独进行北斗二号与三号系统间偏差分析",
+    ttk.Label(desc_frame, text="• 预处理：多普勒预测相位→码相不一致性建模校正→CMC变化阈值剔除→历元间双差剔除→BDS2/3 ISB分析校正",
               font=("Microsoft YaHei", 10)).pack(anchor=tk.W, pady=2)
     ttk.Label(desc_frame, text="• 可视化：生成各类分析图表，支持单独保存和批量保存",
               font=("Microsoft YaHei", 10)).pack(anchor=tk.W, pady=2)
@@ -131,6 +126,9 @@ def main():
     # 绑定关闭事件
     root.protocol("WM_DELETE_WINDOW", on_closing)
 
+    # 居中显示主窗口
+    center_window(root, 750, 500)
+
     root.mainloop()
 
 
@@ -138,13 +136,13 @@ def show_cleaning_window(parent):
     """显示数据预处理功能窗口"""
     cleaning_window = tk.Toplevel(parent)
     cleaning_window.title("数据预处理")
-    cleaning_window.geometry("700x800")
+    cleaning_window.geometry("760x850")
     cleaning_window.resizable(True, True)
     cleaning_window.transient(parent)
     cleaning_window.grab_set()
 
     # 居中显示窗口
-    center_window(cleaning_window, 700, 800)
+    center_window(cleaning_window, 760, 850)
 
     # 主框架
     main_frame = ttk.Frame(cleaning_window, padding="20")
@@ -221,6 +219,168 @@ def show_cleaning_window(parent):
     param_frame = ttk.LabelFrame(main_frame, text="参数设置", padding="10")
     param_frame.pack(fill=tk.X, pady=10)
 
+    # 参数模板选择
+    template_frame = ttk.LabelFrame(param_frame, text="参数模板", padding="5")
+    template_frame.pack(fill=tk.X, pady=5)
+
+    template_row = ttk.Frame(template_frame)
+    template_row.pack(fill=tk.X, pady=2)
+
+    ttk.Label(template_row, text="选择预设模板:").pack(side=tk.LEFT)
+    template_var = tk.StringVar(value="自定义")
+    template_combo = ttk.Combobox(template_row, textvariable=template_var, width=15, state="readonly")
+    template_combo['values'] = ["自定义", "开阔环境", "遮挡环境"]
+    template_combo.pack(side=tk.LEFT, padx=(10, 10))
+
+    def apply_template(*args):
+        """应用参数模板"""
+        template = template_var.get()
+        if template == "开阔环境":
+            # 开阔环境：信号质量好，多径干扰少，可以使用相对严格的阈值
+            code_threshold_var.set(8.0)
+            phase_threshold_var.set(3.0)
+            doppler_threshold_var.set(4.0)
+            threshold_var.set(3.0)
+            r_squared_var.set(0.6)
+            cv_threshold_var.set(0.6)
+        elif template == "遮挡环境":
+            # 遮挡环境：建筑物、树木等遮挡，多径严重，信号质量差，需要宽松参数
+            code_threshold_var.set(10.0)
+            phase_threshold_var.set(4.0)
+            doppler_threshold_var.set(5.0)
+            threshold_var.set(5.0)
+            r_squared_var.set(0.5)
+            cv_threshold_var.set(0.5)
+        # "自定义"不做任何更改，保持用户设定值
+
+    template_combo.bind('<<ComboboxSelected>>', apply_template)
+
+    # 智能推荐按钮
+    recommend_frame = ttk.Frame(template_frame)
+    recommend_frame.pack(fill=tk.X, pady=2)
+
+    def smart_recommend():
+        """基于文件内容智能推荐参数"""
+        if not phone_file_var.get():
+            messagebox.showwarning("警告", "请先选择RINEX文件")
+            return
+        
+        try:
+            # 分析文件
+            analyzer = GNSSAnalyzer()
+            file_path = phone_file_var.get()
+            data = analyzer.read_rinex_obs(file_path)
+            
+            # 评估数据质量
+            total_sats = len(analyzer.observations_meters)
+            total_epochs = len(data.get('epochs', []))
+            
+            # 统计观测值质量
+            valid_obs_ratio = 0
+            total_possible = 0
+            total_valid = 0
+            
+            for sat_id, freq_data in analyzer.observations_meters.items():
+                for freq, obs_data in freq_data.items():
+                    if 'code' in obs_data:
+                        code_values = obs_data['code']
+                        total_possible += len(code_values)
+                        total_valid += sum(1 for v in code_values if v is not None)
+            
+            if total_possible > 0:
+                valid_obs_ratio = total_valid / total_possible
+            
+            # 基于统计结果推荐参数
+            if valid_obs_ratio < 0.75:
+                # 数据质量差，推荐遮挡环境参数
+                template_var.set("遮挡环境")
+                recommended_env = "遮挡环境"
+            else:
+                # 数据质量好，推荐开阔环境参数
+                template_var.set("开阔环境")
+                recommended_env = "开阔环境"
+            
+            # 应用推荐的模板
+            apply_template()
+            
+            # 显示推荐结果
+            messagebox.showinfo("智能推荐", 
+                f"手机GNSS文件分析结果:\n"
+                f"- 总卫星数: {total_sats}\n"
+                f"- 总历元数: {total_epochs}\n"
+                f"- 观测值完整率: {valid_obs_ratio:.1%}\n\n"
+                f"推荐参数模板: {recommended_env}\n"
+                f"建议: {'信号环境较差，适用遮挡环境参数' if valid_obs_ratio < 0.75 else '信号环境较好，适用开阔环境参数'}")
+                
+        except Exception as e:
+            messagebox.showerror("错误", f"文件分析失败:\n{str(e)}")
+
+    ttk.Button(recommend_frame, text="智能推荐参数", command=smart_recommend).pack(side=tk.LEFT, padx=(10, 10))
+
+    # 参数保存/加载
+    def save_params():
+        """保存当前参数配置"""
+        try:
+            config = {
+                'code_threshold': code_threshold_var.get(),
+                'phase_threshold': phase_threshold_var.get(),
+                'doppler_threshold': doppler_threshold_var.get(),
+                'cmc_threshold': threshold_var.get(),
+                'r_squared': r_squared_var.get(),
+                'cv_threshold': cv_threshold_var.get(),
+                'enable_doppler': doppler_enable_var.get(),
+                'enable_cci': cci_enable_var.get(),
+                'enable_isb': isb_enable_var.get(),
+                'phone_only': phone_only_var.get()
+            }
+            
+            import json
+            filename = filedialog.asksaveasfilename(
+                title="保存参数配置",
+                defaultextension=".json",
+                filetypes=[("JSON文件", "*.json"), ("所有文件", "*.*")]
+            )
+            if filename:
+                with open(filename, 'w', encoding='utf-8') as f:
+                    json.dump(config, f, indent=2, ensure_ascii=False)
+                messagebox.showinfo("成功", f"参数配置已保存到:\n{filename}")
+        except Exception as e:
+            messagebox.showerror("错误", f"保存配置失败:\n{str(e)}")
+
+    def load_params():
+        """加载参数配置"""
+        try:
+            filename = filedialog.askopenfilename(
+                title="加载参数配置",
+                filetypes=[("JSON文件", "*.json"), ("所有文件", "*.*")]
+            )
+            if filename:
+                import json
+                with open(filename, 'r', encoding='utf-8') as f:
+                    config = json.load(f)
+                
+                # 应用配置
+                code_threshold_var.set(config.get('code_threshold', 10.0))
+                phase_threshold_var.set(config.get('phase_threshold', 1.5))
+                doppler_threshold_var.set(config.get('doppler_threshold', 5.0))
+                threshold_var.set(config.get('cmc_threshold', 4.0))
+                r_squared_var.set(config.get('r_squared', 0.5))
+                cv_threshold_var.set(config.get('cv_threshold', 0.6))
+                doppler_enable_var.set(config.get('enable_doppler', False))
+                cci_enable_var.set(config.get('enable_cci', True))
+                isb_enable_var.set(config.get('enable_isb', True))
+                phone_only_var.set(config.get('phone_only', False))
+                
+                template_var.set("自定义")
+                messagebox.showinfo("成功", f"参数配置已从以下文件加载:\n{filename}")
+        except Exception as e:
+            messagebox.showerror("错误", f"加载配置失败:\n{str(e)}")
+
+    config_buttons = ttk.Frame(recommend_frame)
+    config_buttons.pack(side=tk.RIGHT)
+    ttk.Button(config_buttons, text="保存配置", command=save_params).pack(side=tk.LEFT, padx=2)
+    ttk.Button(config_buttons, text="加载配置", command=load_params).pack(side=tk.LEFT, padx=2)
+
     # 粗差处理参数设置
     outlier_frame = ttk.LabelFrame(param_frame, text="粗差处理", padding="5")
     outlier_frame.pack(fill=tk.X, pady=5)
@@ -262,24 +422,41 @@ def show_cleaning_window(parent):
     option_frame = ttk.LabelFrame(param_frame, text="可选处理", padding="5")
     option_frame.pack(fill=tk.X, pady=5)
 
-    # 码相不一致性处理选项
+    # 多普勒预测相位处理选项（第一行）
+    doppler_frame = ttk.Frame(option_frame)
+    doppler_frame.pack(fill=tk.X, pady=2)
+
+    doppler_enable_var = tk.BooleanVar(value=False)
+    doppler_enable_checkbox = ttk.Checkbutton(doppler_frame, text="启用多普勒预测相位",
+                                              variable=doppler_enable_var)
+    doppler_enable_checkbox.pack(side=tk.LEFT)
+
+    ttk.Label(doppler_frame, text="(基于多普勒观测值预测并填补缺失的载波相位观测值)").pack(side=tk.LEFT, padx=(10, 0))
+
+    # 码相不一致性处理选项（第二行）
+    cci_frame_option = ttk.Frame(option_frame)
+    cci_frame_option.pack(fill=tk.X, pady=2)
+
     cci_enable_var = tk.BooleanVar(value=True)
-    cci_enable_checkbox = ttk.Checkbutton(option_frame, text="启用码相不一致性(CCI)处理",
+    cci_enable_checkbox = ttk.Checkbutton(cci_frame_option, text="启用码相不一致性(CCI)处理",
                                           variable=cci_enable_var)
     cci_enable_checkbox.pack(side=tk.LEFT)
 
-    ttk.Label(option_frame, text="(需要接收机文件作为基准，校正载波相位观测值)").pack(side=tk.LEFT, padx=(10, 20))
+    ttk.Label(cci_frame_option, text="(需要接收机文件作为基准，校正载波相位观测值)").pack(side=tk.LEFT, padx=(10, 0))
 
-    # ISB处理选项
+    # ISB处理选项（第三行）
+    isb_frame_option = ttk.Frame(option_frame)
+    isb_frame_option.pack(fill=tk.X, pady=2)
+
     isb_enable_var = tk.BooleanVar(value=True)
-    isb_enable_checkbox = ttk.Checkbutton(option_frame, text="启用ISB处理",
+    isb_enable_checkbox = ttk.Checkbutton(isb_frame_option, text="启用ISB处理",
                                           variable=isb_enable_var)
     isb_enable_checkbox.pack(side=tk.LEFT)
 
-    ttk.Label(option_frame, text="(需要接收机文件作为基准，校正BDS系统间偏差)").pack(side=tk.LEFT, padx=(10, 0))
+    ttk.Label(isb_frame_option, text="(需要接收机文件作为基准，校正BDS系统间偏差)").pack(side=tk.LEFT, padx=(10, 0))
 
-    # 码相不一致性处理参数设置
-    cci_frame = ttk.LabelFrame(param_frame, text="码相不一致性处理参数", padding="5")
+    # 码相不一致性处理
+    cci_frame = ttk.LabelFrame(param_frame, text="码相不一致性处理", padding="5")
     cci_frame.pack(fill=tk.X, pady=5)
 
     # R方阈值和CV值阈值设置（同一行）
@@ -310,14 +487,6 @@ def show_cleaning_window(parent):
     phone_only_checkbox.pack(side=tk.LEFT)
 
     ttk.Label(phone_only_frame, text="(检测手机独有卫星的码相不一致性)").pack(side=tk.LEFT, padx=(10, 0))
-
-    # BDS-2/3 ISB处理参数设置
-    isb_frame = ttk.LabelFrame(param_frame, text="BDS-2/3 ISB处理参数", padding="5")
-    isb_frame.pack(fill=tk.X, pady=5)
-
-    # ISB分析说明
-    ttk.Label(isb_frame, text="使用动态基准卫星选择，自动选择质量最好的BDS-2卫星作为基准",
-              font=("Microsoft YaHei", 9)).pack(pady=5)
 
     # 进度显示
     progress_frame = ttk.LabelFrame(main_frame, text="处理进度", padding="10")
@@ -463,6 +632,7 @@ def show_cleaning_window(parent):
                 analyzer.enable_phone_only_analysis = phone_only_var.get()
 
                 # 获取用户选择
+                enable_doppler = doppler_enable_var.get()
                 enable_cci = cci_enable_var.get()
                 enable_isb = isb_enable_var.get()
 
@@ -471,20 +641,52 @@ def show_cleaning_window(parent):
 
                 # 更新状态
                 status_var.set("正在读取RINEX文件...")
-                progress_var.set(10)
+                progress_var.set(5)
                 cleaning_window.update_idletasks()
 
                 # 读取文件
                 data = analyzer.read_rinex_obs(file_path)
 
-                # 步骤1: 码相不一致性建模和校正（如果启用且提供了接收机文件）
-                cci_results = None
-                if enable_cci and receiver_file_var.get():
-                    status_var.set("正在进行码相不一致性建模和校正...")
-                    progress_var.set(20)
+                # 步骤1: 多普勒预测相位（如果启用）
+                doppler_results = None
+                if enable_doppler:
+                    status_var.set("正在进行多普勒预测相位...")
+                    progress_var.set(15)
                     cleaning_window.update_idletasks()
 
                     try:
+                        # 执行多普勒预测相位
+                        doppler_results = analyzer.doppler_phase_prediction(data)
+                        
+                        # 生成修补后的RINEX文件
+                        corrected_rinex_path = analyzer.generate_doppler_corrected_rinex_file()
+                        
+                        # 保存详细日志
+                        log_path = analyzer.save_doppler_correction_log()
+                        
+                        print("多普勒预测相位完成")
+                    except Exception as e:
+                        print(f"多普勒预测相位失败: {e}")
+                        # 继续执行其他步骤，不中断整个流程
+
+                # 步骤2: 码相不一致性建模和校正（如果启用且提供了接收机文件）
+                cci_results = None
+                if enable_cci and receiver_file_var.get():
+                    status_var.set("正在进行码相不一致性建模和校正...")
+                    progress_var.set(25)
+                    cleaning_window.update_idletasks()
+
+                    try:
+                        # 如果进行了多普勒预测，使用修补后的文件作为输入
+                        input_file = file_path
+                        if enable_doppler and doppler_results and analyzer.results.get('doppler_rinex_generation'):
+                            doppler_corrected_path = analyzer.results['doppler_rinex_generation']['output_path']
+                            if os.path.exists(doppler_corrected_path):
+                                # 重新读取修补后的文件
+                                analyzer.input_file_path = doppler_corrected_path
+                                data = analyzer.read_rinex_obs(doppler_corrected_path)
+                                print(f"使用多普勒修补后的文件进行CCI处理: {os.path.basename(doppler_corrected_path)}")
+
                         # 执行码相不一致性建模和校正
                         cci_results = analyzer.perform_code_phase_inconsistency_modeling(
                             receiver_rinex_path=receiver_file_var.get()
@@ -494,21 +696,52 @@ def show_cleaning_window(parent):
                         print(f"码相不一致性建模和校正失败: {e}")
                         # 继续执行其他步骤，不中断整个流程
 
-                # 步骤2: 计算伪距相位差值
+                # 步骤3: 计算伪距相位差值
                 status_var.set("正在计算伪距相位差值...")
-                progress_var.set(40)
+                progress_var.set(45)
                 cleaning_window.update_idletasks()
+
+                # 确保使用正确的数据文件计算差值
+                current_input_file = file_path  # 默认使用原始文件
+                if enable_cci and receiver_file_var.get() and cci_results:
+                    # 如果CCI处理完成，使用CCI处理后的数据
+                    current_input_file = analyzer.input_file_path
+                    print(f"CCI处理完成，使用处理后的文件: {os.path.basename(current_input_file)}")
+                elif enable_doppler and doppler_results and analyzer.results.get('doppler_rinex_generation'):
+                    # 否则如果多普勒预测完成，确保使用预测后的文件
+                    doppler_corrected_path = analyzer.results['doppler_rinex_generation']['output_path']
+                    if os.path.exists(doppler_corrected_path):
+                        current_input_file = doppler_corrected_path
+                        analyzer.input_file_path = doppler_corrected_path
+                        data = analyzer.read_rinex_obs(doppler_corrected_path)
+                        print(f"切换到多普勒修补后的文件: {os.path.basename(doppler_corrected_path)}")
+                
+                # 确保使用正确的文件进行差值计算
+                if current_input_file != file_path:
+                    # 当切换到处理后的文件时
+                    if analyzer.input_file_path != current_input_file:
+                        analyzer.input_file_path = current_input_file
+                        data = analyzer.read_rinex_obs(current_input_file)
+                        print(f"使用文件进行差值计算: {os.path.basename(current_input_file)}")
 
                 code_phase_diffs = analyzer.calculate_code_phase_differences(data)
 
-                # 步骤3: 第一阶段剔除（基于CMC变化阈值）
+                # 步骤4: 第一阶段剔除（基于CMC变化阈值）
                 status_var.set("正在执行第一阶段剔除...")
-                progress_var.set(60)
+                progress_var.set(65)
                 cleaning_window.update_idletasks()
 
                 cleaned_file_path = analyzer.remove_code_phase_outliers(data, threshold_var.get())
+                
+                # 为第二阶段剔除准备正确的输入文件
+                if cleaned_file_path and os.path.exists(cleaned_file_path):
+                    # 使用第一阶段剔除后的文件作为第二阶段的输入
+                    analyzer.input_file_path = cleaned_file_path
+                    # 重新读取剔除后的文件数据
+                    data = analyzer.read_rinex_obs(cleaned_file_path)
+                    print(f"切换到第一阶段剔除后的文件: {os.path.basename(cleaned_file_path)}")
 
-                # 步骤4: 计算历元间双差
+                # 步骤5: 计算历元间双差
                 status_var.set("正在计算历元间双差...")
                 progress_var.set(75)
                 cleaning_window.update_idletasks()
@@ -516,19 +749,19 @@ def show_cleaning_window(parent):
                 double_diffs = analyzer.calculate_epoch_double_differences()
                 triple_errors = analyzer.calculate_triple_median_error(double_diffs)
 
-                # 步骤5: 第二阶段剔除（基于双差）
+                # 步骤6: 第二阶段剔除（基于双差）
                 status_var.set("正在执行第二阶段剔除...")
-                progress_var.set(80)
+                progress_var.set(85)
                 cleaning_window.update_idletasks()
 
                 analyzer.remove_outliers_and_save(double_diffs, triple_errors)
 
-                # 步骤6: ISB分析（如果启用且提供了接收机文件）
+                # 步骤7: ISB分析（如果启用且提供了接收机文件）
                 isb_results = None
                 if enable_isb and receiver_file_var.get():
                     try:
                         status_var.set("正在进行ISB分析...")
-                        progress_var.set(85)
+                        progress_var.set(90)
                         cleaning_window.update_idletasks()
 
                         isb_results = analyzer.perform_complete_isb_analysis(receiver_file_var.get())
@@ -552,31 +785,51 @@ def show_cleaning_window(parent):
                 message += "\n\n处理步骤完成情况："
                 step_num = 1
                 
-                # 步骤1: 码相不一致性建模和校正
+                # 步骤1: 多普勒预测相位
+                if enable_doppler and doppler_results:
+                    message += f"\n{step_num}. ✓ 多普勒预测相位"
+                    step_num += 1
+                
+                # 步骤2: 码相不一致性建模和校正
                 if enable_cci and receiver_file_var.get() and cci_results:
                     message += f"\n{step_num}. ✓ 码相不一致性建模和校正"
                     step_num += 1
                 
-                # 步骤2: 伪距相位差值计算
+                # 步骤3: 伪距相位差值计算
                 message += f"\n{step_num}. ✓ 伪距相位差值计算"
                 step_num += 1
                 
-                # 步骤3: 第一阶段剔除（CMC变化阈值）
+                # 步骤4: 第一阶段剔除（CMC变化阈值）
                 message += f"\n{step_num}. ✓ 第一阶段剔除（CMC变化阈值）"
                 step_num += 1
                 
-                # 步骤4: 历元间双差计算
+                # 步骤5: 历元间双差计算
                 message += f"\n{step_num}. ✓ 历元间双差计算"
                 step_num += 1
                 
-                # 步骤5: 第二阶段剔除（双差阈值）
+                # 步骤6: 第二阶段剔除（双差阈值）
                 message += f"\n{step_num}. ✓ 第二阶段剔除（双差阈值）"
                 step_num += 1
                 
-                # 步骤6: ISB分析
+                # 步骤7: ISB分析
                 if enable_isb and receiver_file_var.get() and isb_results:
                     message += f"\n{step_num}. ✓ ISB分析"
                     step_num += 1
+
+                # 显示多普勒预测相位结果
+                if enable_doppler and doppler_results:
+                    total_missing = doppler_results.get('total_missing', 0)
+                    total_predicted = doppler_results.get('total_predicted', 0)
+                    success_rate = (total_predicted / total_missing * 100) if total_missing > 0 else 0
+                    
+                    message += f"\n\n多普勒预测相位已完成"
+                    message += f"\n总缺失相位观测值: {total_missing} 个"
+                    message += f"\n成功预测修补: {total_predicted} 个"
+                    message += f"\n修补成功率: {success_rate:.2f}%"
+                    
+                    if analyzer.results.get('doppler_rinex_generation'):
+                        doppler_corrected_path = analyzer.results['doppler_rinex_generation']['output_path']
+                        message += f"\n修补后的RINEX文件：{doppler_corrected_path}"
 
                 if enable_cci and receiver_file_var.get() and cci_results:
                     # 显示码相不一致性建模和校正的实际文件路径
@@ -603,8 +856,10 @@ def show_cleaning_window(parent):
                 parent.after(0, lambda: tk.messagebox.showinfo("完成", message))
 
             except Exception as e:
+                # 捕获异常信息
+                error_msg = str(e)
                 # 在主线程中显示错误消息
-                parent.after(0, lambda: tk.messagebox.showerror("错误", f"处理过程中出现错误：\n{str(e)}"))
+                parent.after(0, lambda: tk.messagebox.showerror("错误", f"处理过程中出现错误：\n{error_msg}"))
                 status_var.set("处理失败")
             finally:
                 # 在主线程中恢复按钮
@@ -651,7 +906,7 @@ def show_charts_window(parent):
     charts_window.grab_set()
 
     # 居中显示窗口
-    center_window(charts_window, 700, 800)
+    center_window(charts_window, 800, 850)
 
     # 主框架
     main_frame = ttk.Frame(charts_window, padding="20")
@@ -1968,13 +2223,13 @@ def show_report_window(parent):
     """显示报告功能窗口"""
     report_window = tk.Toplevel(parent)
     report_window.title("分析报告")
-    report_window.geometry("600x500")
+    report_window.geometry("550x450")
     report_window.resizable(True, True)
     report_window.transient(parent)
     report_window.grab_set()
 
     # 居中显示窗口
-    center_window(report_window, 600, 500)
+    center_window(report_window, 550, 450)
 
     # 主框架
     main_frame = ttk.Frame(report_window, padding="20")

@@ -125,6 +125,82 @@ class GNSSAnalyzer:
         # 当前输入文件路径及对应结果子目录
         self.input_file_path = None
         self.current_result_dir = None
+        
+    def _extract_original_filename(self, file_path: str) -> str:
+        """
+        从文件路径中提取原始文件名（不包含处理后缀）
+
+        """
+        filename = os.path.basename(file_path)
+        # 移除扩展名
+        name_without_ext = filename.split('.')[0]
+        
+        # 移除代码中实际定义的处理后缀
+        # 基于代码分析得出的实际文件命名模式
+        suffixes_to_remove = [
+            # 后缀模式（添加在原文件名后）
+            '-doppler predicted',      # 多普勒相位预测处理
+            '-cc inconsistency',       # 码相不一致性处理  
+            '-isb',                    # ISB系统间偏差处理
+            '_corrected',              # 校正后文件
+            # 前缀模式（添加在原文件名前）
+            'cleaned1-',               # 第一阶段数据清理
+            'cleaned2-',               # 第二阶段数据清理
+        ]
+        
+        original_name = name_without_ext
+        
+        # 迭代移除所有后缀，直到没有更多后缀可以移除
+        changed = True
+        while changed:
+            changed = False
+            for suffix in suffixes_to_remove:
+                if suffix.endswith('-'):
+                    # 处理前缀情况
+                    if original_name.startswith(suffix):
+                        original_name = original_name[len(suffix):]
+                        changed = True
+                elif suffix.startswith('-') or suffix.startswith('_'):
+                    # 处理后缀情况
+                    if original_name.endswith(suffix):
+                        original_name = original_name[:-len(suffix)]
+                        changed = True
+                else:
+                    # 处理特殊前缀情况
+                    if original_name.startswith(suffix):
+                        original_name = original_name[len(suffix):]
+                        changed = True
+        
+        return original_name
+    
+    def _get_main_result_directory(self, file_path: str = None) -> str:
+        """
+        获取基于原始文件名的主结果目录路径
+        
+        参数:
+            file_path: 文件路径，如果为None则使用self.input_file_path
+            
+        返回:
+            主结果目录路径
+        """
+        if file_path is None:
+            file_path = self.input_file_path
+        
+        original_name = self._extract_original_filename(file_path)
+        return os.path.join(self.results_root, original_name)
+    
+    def _set_result_directory(self, file_path: str) -> None:
+        """
+        设置结果目录，所有结果都保存在原始文件名对应的主目录下
+        """
+        original_name = self._extract_original_filename(file_path)
+        
+        # 所有结果都保存在主结果目录下
+        main_result_dir = os.path.join(self.results_root, original_name)
+        os.makedirs(main_result_dir, exist_ok=True)
+        
+        # 当前结果目录就是主目录
+        self.current_result_dir = main_result_dir
         # 定义各类图表的子文件夹名称
         self.plot_categories = {
             'raw_observations': '原始观测值',
@@ -171,9 +247,8 @@ class GNSSAnalyzer:
     def read_rinex_obs(self, file_path: str) -> Dict:
         """读取RINEX观测文件并解析数据"""
         self.input_file_path = file_path
-        filename = os.path.basename(file_path)
-        self.current_result_dir = os.path.join(self.results_root, filename.split('.')[0])
-        os.makedirs(self.current_result_dir, exist_ok=True)
+        # 使用新的路径设置方法
+        self._set_result_directory(file_path)
 
         data = {
             'header': {},
@@ -439,10 +514,11 @@ class GNSSAnalyzer:
         - C: L2I, L1P, L5P
         """
         self.receiver_input_file_path = file_path
-        filename = os.path.basename(file_path)
-        # 单独结果目录
-        self.current_result_dir = os.path.join(self.results_root, filename.split('.')[0])
-        os.makedirs(self.current_result_dir, exist_ok=True)
+        # 使用新的路径设置方法 - 接收机文件也应该基于手机文件的原始名创建目录
+        if hasattr(self, 'input_file_path') and self.input_file_path:
+            self._set_result_directory(self.input_file_path)
+        else:
+            self._set_result_directory(file_path)
 
         data = {'header': {}, 'epochs': []}
         self.start_stage(0, "读取接收机RINEX文件", 100)
@@ -2504,7 +2580,7 @@ class GNSSAnalyzer:
         input_file = self.input_file_path
         phone_file_name = os.path.basename(self.input_file_path)
         phone_file_name_no_ext = os.path.splitext(phone_file_name)[0]
-        phone_result_dir = os.path.join("results", phone_file_name_no_ext)
+        phone_result_dir = self._get_main_result_directory()
 
         print(f"使用原始文件进行码相不一致性建模和校正: {phone_file_name}")
 
@@ -3006,16 +3082,26 @@ class GNSSAnalyzer:
         # 保存报告和日志到文件（使用手机文件的结果目录）
         phone_file_name = os.path.basename(self.input_file_path)
         phone_file_name_no_ext = os.path.splitext(phone_file_name)[0]
-        phone_result_dir = os.path.join("results", phone_file_name_no_ext)
+        phone_result_dir = self._get_main_result_directory()
 
         if os.path.exists(phone_result_dir):
             # 创建code-carrier inconsistency子文件夹
             cci_dir = os.path.join(phone_result_dir, "code-carrier inconsistency")
             if not os.path.exists(cci_dir):
                 os.makedirs(cci_dir)
-            report_path = os.path.join(cci_dir, "码相不一致性建模报告.txt")
+            report_path = os.path.join(cci_dir, "CCI.log")
+            # 在报告开头添加文件信息
+            enhanced_report = (
+                f"码相不一致性建模报告\n"
+                f"=" * 60 + "\n"
+                f"处理时间: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+                f"手机GNSS数据文件: {os.path.basename(self.input_file_path)}\n"
+                f"文件完整路径: {self.input_file_path}\n"
+                f"=" * 60 + "\n\n"
+                f"{report}"
+            )
             with open(report_path, 'w', encoding='utf-8') as f:
-                f.write(report)
+                f.write(enhanced_report)
             print(f"分析报告已保存: {report_path}")
 
             # 保存处理日志
@@ -3048,7 +3134,7 @@ class GNSSAnalyzer:
         # 使用手机文件的结果目录
         phone_file_name = os.path.basename(self.input_file_path)
         phone_file_name_no_ext = os.path.splitext(phone_file_name)[0]
-        phone_result_dir = os.path.join("results", phone_file_name_no_ext)
+        phone_result_dir = self._get_main_result_directory()
 
         if not os.path.exists(phone_result_dir):
             return None
@@ -3065,8 +3151,10 @@ class GNSSAnalyzer:
             "码相不一致性建模和校正处理日志\n",
             "=" * 70 + "\n\n",
             f"处理时间: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n",
-            f"手机RINEX文件: {self.input_file_path}\n",
-            f"接收机RINEX文件: {receiver_rinex_path}\n\n"
+            f"手机GNSS数据文件: {os.path.basename(self.input_file_path)}\n",
+            f"手机文件完整路径: {self.input_file_path}\n",
+            f"接收机RINEX参考文件: {os.path.basename(receiver_rinex_path)}\n",
+            f"接收机文件完整路径: {receiver_rinex_path}\n\n"
         ]
 
         # 载波相位修改详情
@@ -3230,6 +3318,9 @@ class GNSSAnalyzer:
             "=" * 70 + "\n",
             "基于伪距相位差值变化的异常观测值剔除日志\n",
             "=" * 70 + "\n\n",
+            f"处理时间: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n",
+            f"手机GNSS数据文件: {os.path.basename(self.input_file_path)}\n",
+            f"文件完整路径: {self.input_file_path}\n",
             f"差值变化阈值: {threshold} 米\n\n"
         ]
 
@@ -3279,21 +3370,43 @@ class GNSSAnalyzer:
         input_file_path = self.input_file_path
         phone_file_name = os.path.basename(self.input_file_path)
         phone_file_name_no_ext = os.path.splitext(phone_file_name)[0]
-        phone_result_dir = os.path.join("results", phone_file_name_no_ext)
+        original_ext = os.path.splitext(self.input_file_path)[1]
+        phone_result_dir = self._get_main_result_directory()
 
-        # 检查是否存在CCI处理后的文件（仅在启用了CCI处理时）
+        # 按优先级选择输入文件：CCI处理后 > 多普勒预测后 > 原始文件
+        input_file_path = self.input_file_path  # 默认使用当前输入文件
+        
         if enable_cci:
+            # 如果启用了CCI处理，优先使用CCI处理后的文件
             cci_dir = os.path.join(phone_result_dir, "code-carrier inconsistency")
-            cci_file_name = f"{phone_file_name_no_ext}-cc inconsistency.25o"
+            cci_file_name = f"{phone_file_name_no_ext}-cc inconsistency{original_ext}"
             cci_file_path = os.path.join(cci_dir, cci_file_name)
 
             if os.path.exists(cci_file_path):
                 input_file_path = cci_file_path
                 log_content.append(f"使用CCI处理后的文件: {cci_file_name}\n")
             else:
-                log_content.append(f"使用原始文件: {phone_file_name}\n")
+                # 如果CCI文件不存在，检查是否有多普勒预测后的文件
+                doppler_dir = os.path.join(phone_result_dir, "doppler prediction")
+                doppler_file_name = f"{phone_file_name_no_ext}-doppler predicted{original_ext}"
+                doppler_file_path = os.path.join(doppler_dir, doppler_file_name)
+                
+                if os.path.exists(doppler_file_path):
+                    input_file_path = doppler_file_path
+                    log_content.append(f"使用多普勒预测后的文件: {doppler_file_name}\n")
+                else:
+                    log_content.append(f"使用原始文件: {phone_file_name}\n")
         else:
-            log_content.append(f"使用原始文件: {phone_file_name}\n")
+            # 如果未启用CCI处理，检查是否有多普勒预测后的文件
+            doppler_dir = os.path.join(phone_result_dir, "doppler prediction")
+            doppler_file_name = f"{phone_file_name_no_ext}-doppler predicted{original_ext}"
+            doppler_file_path = os.path.join(doppler_dir, doppler_file_name)
+            
+            if os.path.exists(doppler_file_path):
+                input_file_path = doppler_file_path
+                log_content.append(f"使用多普勒预测后的文件: {doppler_file_name}\n")
+            else:
+                log_content.append(f"使用原始文件: {phone_file_name}\n")
 
         with open(input_file_path, 'r', encoding='utf-8') as f:
             lines = f.readlines()
@@ -3422,7 +3535,7 @@ class GNSSAnalyzer:
         # 生成输出文件路径
         phone_file_name = os.path.basename(self.input_file_path)
         phone_file_name_no_ext = os.path.splitext(phone_file_name)[0]
-        phone_result_dir = os.path.join("results", phone_file_name_no_ext)
+        phone_result_dir = self._get_main_result_directory()
 
         # 创建Coarse error子文件夹
         coarse_error_dir = os.path.join(phone_result_dir, "Coarse error")
@@ -3430,10 +3543,13 @@ class GNSSAnalyzer:
             os.makedirs(coarse_error_dir)
 
         # 根据是否启用CCI处理决定文件名
+        # 获取原始文件扩展名
+        original_ext = os.path.splitext(self.input_file_path)[1]
+        
         if enable_cci:
-            base_file_name = f"{phone_file_name_no_ext}-cc inconsistency.25o"
+            base_file_name = f"{phone_file_name_no_ext}-cc inconsistency{original_ext}"
         else:
-            base_file_name = f"{phone_file_name_no_ext}.25o"
+            base_file_name = f"{phone_file_name_no_ext}{original_ext}"
         cleaned_file_name = f"cleaned1-{base_file_name}"
         output_path = os.path.join(coarse_error_dir, cleaned_file_name)
 
@@ -3591,6 +3707,554 @@ class GNSSAnalyzer:
 
         self.results['phase_prediction_errors'] = errors
         return errors
+
+    def doppler_phase_prediction(self, data: Dict) -> Dict:
+        """
+        基于多普勒观测值预测缺失载波相位
+        
+        使用公式：φ_{t,pred} = φ_{t-1,red} - (D_{t-1} + D_t)/2 * Δt
+        其中：
+        - φ_{t,pred}: 预测的相位值（周）
+        - φ_{t-1,red}: 前一历元的相位值（周）或递归预测值
+        - D_{t-1}, D_t: 前一历元和当前历元的多普勒频率（Hz）
+        - Δt: 时间差（秒）
+        
+        参数:
+            data: RINEX观测数据
+            
+        返回:
+            Dict: 预测结果和修补详情
+        """
+        self.start_stage(0, "基于多普勒预测缺失载波相位", 100)
+        
+        prediction_results = {
+            'predicted_phases': {},  # 预测的相位值
+            'missing_epochs': {},    # 缺失历元统计
+            'correction_log': [],    # 修补详情日志
+            'total_missing': 0,      # 总缺失数量
+            'total_predicted': 0     # 总预测数量
+        }
+        
+        # 确保已读取观测数据
+        if not self.observations_meters:
+            print("警告: 未找到观测数据，无法进行相位预测")
+            return prediction_results
+        
+        total_sats = len(self.observations_meters)
+        processed_sats = 0
+        
+        for sat_id, freq_data in self.observations_meters.items():
+            sat_prediction = {}
+            sat_missing_epochs = {}
+            
+            for freq, obs_data in freq_data.items():
+                times = obs_data['times']
+                phase_values = obs_data['phase_cycle']  # 周
+                doppler_values = obs_data['doppler']    # 米/秒
+                
+                # 获取频率和波长信息
+                frequency = self.frequencies[sat_id[0]].get(freq)
+                wavelength = self.wavelengths[sat_id[0]].get(freq)
+                
+                if frequency is None or wavelength is None:
+                    continue
+                
+                # 初始化频率预测结果
+                freq_prediction = {
+                    'times': [],
+                    'original_phases': [],      # 原始相位值（周）
+                    'predicted_phases': [],     # 预测相位值（周）
+                    'is_predicted': [],         # 是否为预测值的标记
+                    'missing_epochs': [],       # 缺失历元索引
+                    'prediction_details': []    # 预测详情
+                }
+                
+                missing_epochs = []
+                
+                # 检测缺失相位并进行预测
+                for i in range(len(times)):
+                    if phase_values[i] is None:
+                        # 发现缺失相位
+                        missing_epochs.append(i)
+                        
+                        # 尝试预测
+                        predicted_phase = self._predict_phase_at_epoch(
+                            i, times, phase_values, doppler_values, 
+                            frequency, wavelength, freq_prediction
+                        )
+                        
+                        if predicted_phase is not None:
+                            freq_prediction['times'].append(times[i])
+                            freq_prediction['original_phases'].append(None)
+                            freq_prediction['predicted_phases'].append(predicted_phase)
+                            freq_prediction['is_predicted'].append(True)
+                            
+                            # 临时填入预测值以供后续递归使用
+                            phase_values[i] = predicted_phase
+                            
+                            # 记录预测详情
+                            detail = {
+                                'sat_id': sat_id,
+                                'freq': freq,
+                                'epoch_idx': i,
+                                'time': times[i],
+                                'predicted_phase_cycle': predicted_phase,
+                                'predicted_phase_m': predicted_phase * wavelength
+                            }
+                            freq_prediction['prediction_details'].append(detail)
+                            prediction_results['correction_log'].append(detail)
+                            prediction_results['total_predicted'] += 1
+                    else:
+                        # 非缺失相位
+                        freq_prediction['times'].append(times[i])
+                        freq_prediction['original_phases'].append(phase_values[i])
+                        freq_prediction['predicted_phases'].append(phase_values[i])
+                        freq_prediction['is_predicted'].append(False)
+                
+                freq_prediction['missing_epochs'] = missing_epochs
+                sat_prediction[freq] = freq_prediction
+                sat_missing_epochs[freq] = missing_epochs
+                prediction_results['total_missing'] += len(missing_epochs)
+            
+            if sat_prediction:
+                prediction_results['predicted_phases'][sat_id] = sat_prediction
+                prediction_results['missing_epochs'][sat_id] = sat_missing_epochs
+            
+            processed_sats += 1
+            self.update_progress(int(processed_sats / total_sats * 100))
+        
+        # 保存结果
+        self.results['doppler_phase_prediction'] = prediction_results
+        
+        print(f"相位预测完成: 总缺失 {prediction_results['total_missing']} 个, "
+              f"成功预测 {prediction_results['total_predicted']} 个")
+        
+        return prediction_results
+    
+    def _predict_phase_at_epoch(self, target_idx, times, phase_values, doppler_values,
+                                frequency, wavelength, freq_prediction):
+        """
+        预测指定历元的相位值
+        
+        参数:
+            target_idx: 目标历元索引
+            times: 时间序列
+            phase_values: 相位值序列（会被修改以支持递归预测）
+            doppler_values: 多普勒值序列（米/秒）
+            frequency: 载波频率（Hz）
+            wavelength: 载波波长（米）
+            freq_prediction: 频率预测结果（用于获取之前预测的值）
+            
+        返回:
+            float: 预测的相位值（周），失败时返回None
+        """
+        if target_idx <= 0:
+            # 第一个历元无法预测
+            return None
+        
+        # 获取前一历元的相位值
+        prev_phase = phase_values[target_idx - 1]
+        if prev_phase is None:
+            # 前一历元也缺失，无法预测
+            return None
+        
+        # 获取多普勒值
+        prev_doppler = doppler_values[target_idx - 1]  # 米/秒
+        curr_doppler = doppler_values[target_idx]      # 米/秒
+        
+        if prev_doppler is None or curr_doppler is None:
+            # 缺少多普勒值，无法预测
+            return None
+        
+        # 时间差
+        time_diff = (times[target_idx] - times[target_idx - 1]).total_seconds()
+        if time_diff <= 0:
+            return None
+        
+        # 将多普勒速度转换为多普勒频率（Hz）
+        prev_doppler_hz = prev_doppler / wavelength
+        curr_doppler_hz = curr_doppler / wavelength
+        
+        # 多普勒频率算术平均
+        doppler_mean_hz = (prev_doppler_hz + curr_doppler_hz) / 2
+        
+        # 使用公式预测相位
+        # φ_{t,pred} = φ_{t-1} - (D_{t-1} + D_t)/2 * Δt / f_c
+        # 注意：多普勒频率与相位变化率的关系是 dφ/dt = -f_d / f_c
+        phase_change = -time_diff * doppler_mean_hz / frequency
+        predicted_phase = prev_phase + phase_change
+        
+        return predicted_phase
+
+    def generate_doppler_corrected_rinex_file(self, output_path: str = None) -> str:
+        """
+        生成基于多普勒预测修补载波相位后的RINEX文件
+        
+        参数:
+            output_path: 输出文件路径，如果为None则自动生成
+            
+        返回:
+            生成的RINEX文件路径
+        """
+        self.start_stage(1, "生成多普勒修补后的RINEX文件", 100)
+        
+        # 确保已进行多普勒相位预测
+        if not self.results.get('doppler_phase_prediction'):
+            raise ValueError("未进行多普勒相位预测，无法生成修补后的RINEX文件")
+        
+        prediction_data = self.results['doppler_phase_prediction']['predicted_phases']
+        
+        if not self.input_file_path:
+            raise ValueError("未设置输入文件路径，无法生成修补后的RINEX文件")
+        
+        # 生成输出文件路径
+        if output_path is None:
+            phone_file_name = os.path.basename(self.input_file_path)
+            phone_file_name_no_ext = os.path.splitext(phone_file_name)[0]
+            phone_result_dir = self._get_main_result_directory()
+            
+            # 创建doppler prediction子文件夹
+            doppler_dir = os.path.join(phone_result_dir, "doppler prediction")
+            os.makedirs(doppler_dir, exist_ok=True)
+            
+            # 使用原始文件名，添加-doppler predicted后缀
+            original_basename = os.path.basename(self.input_file_path)
+            original_name, original_ext = os.path.splitext(original_basename)
+            output_path = os.path.join(doppler_dir, f"{original_name}-doppler predicted{original_ext}")
+        
+        # 读取RINEX文件内容
+        with open(self.input_file_path, 'r', encoding='utf-8') as f:
+            original_lines = f.readlines()
+        
+        # 解析文件头以获取观测类型信息
+        self.rinex_data = {'header': {}}
+        header_end = -1
+        for i, line in enumerate(original_lines):
+            if 'END OF HEADER' in line:
+                header_end = i
+                break
+        
+        if header_end > 0:
+            for i in range(header_end):
+                line = original_lines[i]
+                if 'SYS / # / OBS TYPES' in line:
+                    system = line[0]
+                    num_types = int(line[3:6])
+                    obs_types_list = line[7:60].split()
+                    
+                    # 处理观测类型可能跨行的情况
+                    j = i + 1
+                    while len(obs_types_list) < num_types and j < len(original_lines):
+                        cont_line = original_lines[j]
+                        if cont_line[6] == ' ':  # continuation line
+                            obs_types_list.extend(cont_line[7:60].split())
+                            j += 1
+                        else:
+                            break
+                    
+                    if system:
+                        self.rinex_data['header'][f'obs_types_{system}'] = obs_types_list[:num_types] if num_types > 0 else obs_types_list
+        
+        # 解析历元时间戳
+        epoch_timestamps = {}
+        current_epoch = 0
+        for line in original_lines:
+            if line.startswith('>'):
+                current_epoch += 1
+                parts = line[1:].split()
+                if len(parts) >= 6:
+                    year, month, day, hour, minute, second = parts[:6]
+                    second_float = float(second)
+                    timestamp = f"{year} {month} {day} {hour} {minute} {second_float}"
+                    epoch_timestamps[current_epoch] = timestamp
+        
+        # 解析观测类型信息
+        system_obs_info = {}
+        for line in original_lines:
+            if 'SYS / # / OBS TYPES' in line:
+                system = line[0]
+                obs_types = line.split()[2:]
+                freq_to_indices = {}
+                
+                for idx, obs_type in enumerate(obs_types):
+                    if obs_type.startswith('L'):  # 载波相位观测
+                        freq_key = f"L{obs_type[1:]}"
+                        if freq_key not in freq_to_indices:
+                            freq_to_indices[freq_key] = {}
+                        freq_to_indices[freq_key]['phase'] = idx
+                
+                system_obs_info[system] = {
+                    'obs_types': obs_types,
+                    'freq_to_indices': freq_to_indices
+                }
+        
+        # 复制原始文件内容到输出
+        output_lines = original_lines.copy()
+        
+        # 记录修改详情
+        modification_details = []
+        total_modifications = 0
+        modified_satellites = set()
+        
+        # 处理每个有预测数据的卫星
+        for sat_id, sat_data in prediction_data.items():
+            sat_system = sat_id[0]
+            sat_prn = sat_id[1:].zfill(2)
+            
+            if sat_system not in system_obs_info:
+                continue
+            
+            freq_to_indices = system_obs_info[sat_system]['freq_to_indices']
+            
+            for freq, freq_data in sat_data.items():
+                if freq not in freq_to_indices or 'phase' not in freq_to_indices[freq]:
+                    continue
+                
+                phase_field_idx = freq_to_indices[freq]['phase']
+                wavelength = self.wavelengths.get(sat_system, {}).get(freq)
+                
+                if wavelength is None:
+                    continue
+                
+                # 处理每个预测的相位值
+                for detail in freq_data['prediction_details']:
+                    epoch_idx = detail['epoch_idx']
+                    predicted_phase_cycle = detail['predicted_phase_cycle']
+                    
+                    # 找到对应的RINEX文件行
+                    epoch_line_found = False
+                    current_epoch_in_file = 0
+                    
+                    for line_idx, line in enumerate(output_lines):
+                        if line.startswith('>'):
+                            current_epoch_in_file += 1
+                            if current_epoch_in_file - 1 == epoch_idx:
+                                # 找到对应历元，查找卫星数据行
+                                j = line_idx + 1
+                                while j < len(output_lines) and not output_lines[j].startswith('>'):
+                                    sat_line = output_lines[j]
+                                    if (len(sat_line) >= 3 and 
+                                        sat_line[0] == sat_system and 
+                                        sat_line[1:3].strip().zfill(2) == sat_prn):
+                                        
+                                        # 应用相位修补
+                                        modified_line, mod_detail = self._apply_doppler_phase_correction_to_line(
+                                            sat_line, sat_id, freq, phase_field_idx, 
+                                            predicted_phase_cycle, wavelength
+                                        )
+                                        
+                                        if mod_detail:
+                                            output_lines[j] = modified_line
+                                            modification_details.append(mod_detail)
+                                            total_modifications += 1
+                                            modified_satellites.add(sat_id)
+                                        
+                                        epoch_line_found = True
+                                        break
+                                    j += 1
+                                break
+                        
+                        if epoch_line_found:
+                            break
+        
+        # 写入输出文件
+        with open(output_path, 'w', encoding='utf-8') as f:
+            f.writelines(output_lines)
+        
+        print(f"多普勒修补完成: 修补了 {total_modifications} 个相位观测值，涉及 {len(modified_satellites)} 颗卫星")
+        print(f"输出文件: {output_path}")
+        
+        # 保存修改详情到结果中
+        self.results['doppler_rinex_generation'] = {
+            'output_path': output_path,
+            'modification_details': modification_details,
+            'total_modifications': total_modifications,
+            'modified_satellites': list(modified_satellites)
+        }
+        
+        return output_path
+    
+    def _apply_doppler_phase_correction_to_line(self, obs_line, sat_id, freq, 
+                                                phase_field_idx, predicted_phase_cycle, wavelength):
+        """
+        将多普勒预测的相位值应用到RINEX观测数据行
+        
+        参数:
+            obs_line: 原始观测数据行
+            sat_id: 卫星ID
+            freq: 频率
+            phase_field_idx: 相位字段在观测类型中的索引
+            predicted_phase_cycle: 预测的相位值（周）
+            wavelength: 载波波长（米）
+            
+        返回:
+            (修改后的观测数据行, 修改详情)
+        """
+        line = obs_line.rstrip('\n')
+        if len(line) < 3:
+            return obs_line, None
+        
+        # 计算相位字段在行中的位置 (需要右移2个字符)
+        field_start = 3 + phase_field_idx * 16 + 2
+        field_end = field_start + 14  # RINEX观测值字段宽度为14字符
+        
+        if len(line) < field_end:
+            # 扩展行长度以容纳新字段
+            line = line.ljust(field_end + 2)
+        
+        # 格式化预测的相位值（14位字段，3位小数）
+        phase_str = f"{predicted_phase_cycle:14.3f}"
+        
+        # 替换相位字段
+        modified_line = line[:field_start] + phase_str + line[field_end:]
+        
+        # 记录修改详情
+        modification_detail = {
+            'sat_id': sat_id,
+            'freq': freq,
+            'field_idx': phase_field_idx,
+            'predicted_phase_cycle': predicted_phase_cycle,
+            'predicted_phase_m': predicted_phase_cycle * wavelength,
+            'wavelength': wavelength,
+            'debug_info': f"卫星 {sat_id}，频率 {freq}\n  预测相位: {predicted_phase_cycle:.6f} 周 ({predicted_phase_cycle * wavelength:.6f} 米)\n  波长: {wavelength:.4f} 米"
+        }
+        
+        return modified_line + '\n', modification_detail
+
+    def save_doppler_correction_log(self) -> str:
+        """
+        保存多普勒相位修补的详细日志文件
+        
+        返回:
+            日志文件路径
+        """
+        if not self.results.get('doppler_phase_prediction'):
+            print("警告: 未找到多普勒相位预测结果，无法生成日志")
+            return ""
+        
+        prediction_results = self.results['doppler_phase_prediction']
+        
+        # 确定日志文件保存路径
+        phone_file_name = os.path.basename(self.input_file_path)
+        phone_file_name_no_ext = os.path.splitext(phone_file_name)[0]
+        phone_result_dir = self._get_main_result_directory()
+        doppler_dir = os.path.join(phone_result_dir, "doppler prediction")
+        os.makedirs(doppler_dir, exist_ok=True)
+        
+        log_file_path = os.path.join(doppler_dir, f"doppler_prediction.log")
+        
+        # 构建日志内容
+        log_content = []
+        log_content.append("基于多普勒观测值预测载波相位处理日志\n")
+        log_content.append("=" * 60 + "\n")
+        log_content.append(f"手机GNSS数据文件: {os.path.basename(self.input_file_path)}\n")
+        log_content.append(f"文件完整路径: {self.input_file_path}\n")
+        log_content.append(f"处理时间: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+        log_content.append("\n")
+        
+        # 处理统计信息
+        log_content.append("处理统计信息:\n")
+        log_content.append("-" * 40 + "\n")
+        log_content.append(f"总缺失相位观测值: {prediction_results['total_missing']} 个\n")
+        log_content.append(f"成功预测修补: {prediction_results['total_predicted']} 个\n")
+        success_rate = (prediction_results['total_predicted'] / prediction_results['total_missing'] * 100) if prediction_results['total_missing'] > 0 else 0
+        log_content.append(f"修补成功率: {success_rate:.2f}%\n")
+        log_content.append("\n")
+        
+        # 按卫星分类统计
+        log_content.append("按卫星分类统计:\n")
+        log_content.append("-" * 40 + "\n")
+        
+        missing_epochs = prediction_results.get('missing_epochs', {})
+        predicted_phases = prediction_results.get('predicted_phases', {})
+        
+        for sat_id in sorted(missing_epochs.keys()):
+            sat_missing = missing_epochs[sat_id]
+            sat_predicted = predicted_phases.get(sat_id, {})
+            
+            total_missing_sat = sum(len(epochs) for epochs in sat_missing.values())
+            total_predicted_sat = sum(len(freq_data.get('prediction_details', [])) 
+                                    for freq_data in sat_predicted.values())
+            
+            log_content.append(f"卫星 {sat_id}:\n")
+            log_content.append(f"  总缺失: {total_missing_sat} 个\n")
+            log_content.append(f"  成功预测: {total_predicted_sat} 个\n")
+            
+            # 按频率详细统计
+            for freq in sorted(sat_missing.keys()):
+                missing_count = len(sat_missing[freq])
+                predicted_count = len(sat_predicted.get(freq, {}).get('prediction_details', []))
+                log_content.append(f"    频率 {freq}: 缺失 {missing_count} 个, 预测 {predicted_count} 个\n")
+            
+            log_content.append("\n")
+        
+        # 详细修补记录
+        log_content.append("详细修补记录:\n")
+        log_content.append("-" * 40 + "\n")
+        
+        correction_log = prediction_results.get('correction_log', [])
+        if correction_log:
+            # 按卫星和频率分组
+            from collections import defaultdict
+            sat_freq_groups = defaultdict(lambda: defaultdict(list))
+            
+            for detail in correction_log:
+                sat_id = detail['sat_id']
+                freq = detail['freq']
+                sat_freq_groups[sat_id][freq].append(detail)
+            
+            for sat_id in sorted(sat_freq_groups.keys()):
+                log_content.append(f"卫星 {sat_id}:\n")
+                
+                for freq in sorted(sat_freq_groups[sat_id].keys()):
+                    freq_details = sat_freq_groups[sat_id][freq]
+                    log_content.append(f"  频率 {freq}:\n")
+                    
+                    for detail in freq_details:
+                        time_str = detail['time'].strftime('%H:%M:%S')
+                        log_content.append(f"    历元 {detail['epoch_idx']+1} ({time_str}): "
+                                         f"预测相位 {detail['predicted_phase_cycle']:.6f} 周 "
+                                         f"({detail['predicted_phase_m']:.6f} 米)\n")
+                    
+                    log_content.append("\n")
+        else:
+            log_content.append("无成功预测的相位值\n\n")
+        
+        # 处理方法说明
+        log_content.append("处理方法说明:\n")
+        log_content.append("-" * 40 + "\n")
+        log_content.append("使用公式: φ_pred = φ_prev - (D_prev + D_curr)/2 * Δt\n")
+        log_content.append("其中:\n")
+        log_content.append("  φ_pred: 预测的相位值（周）\n")
+        log_content.append("  φ_prev: 前一历元的相位值（周）或递归预测值\n")
+        log_content.append("  D_prev, D_curr: 前一历元和当前历元的多普勒频率（Hz）\n")
+        log_content.append("  Δt: 时间差（秒）\n")
+        log_content.append("\n")
+        log_content.append("注意事项:\n")
+        log_content.append("- 对于连续缺失的相位观测值，采用递归预测方法\n")
+        log_content.append("- 预测需要前一历元有有效的相位观测值或预测值\n")
+        log_content.append("- 预测需要当前历元和前一历元都有有效的多普勒观测值\n")
+        log_content.append("- 第一个历元无法进行预测\n")
+        log_content.append("\n")
+        
+        # 质量评估（如果有的话）
+        if hasattr(self, 'results') and 'phase_prediction_errors' in self.results:
+            log_content.append("相位预测误差统计（基于原有方法的对比）:\n")
+            log_content.append("-" * 40 + "\n")
+            log_content.append("注意: 此统计基于原有的相位预测误差计算方法，仅供参考\n")
+            # 这里可以添加与原有预测误差方法的对比分析
+        
+        # 写入日志文件
+        try:
+            with open(log_file_path, 'w', encoding='utf-8') as f:
+                f.writelines(log_content)
+            
+            print(f"日志已保存: {log_file_path}")
+            return log_file_path
+            
+        except Exception as e:
+            print(f"保存多普勒相位修补日志时出错: {e}")
+            return ""
 
     def calculate_epoch_double_differences(self):
         """计算各卫星各频率的历元间双差（伪距、相位、多普勒）"""
@@ -4556,7 +5220,7 @@ class GNSSAnalyzer:
         # 创建图表目录（使用手机文件的结果目录）
         phone_file_name = os.path.basename(self.input_file_path)
         phone_file_name_no_ext = os.path.splitext(phone_file_name)[0]
-        phone_result_dir = os.path.join("results", phone_file_name_no_ext)
+        phone_result_dir = self._get_main_result_directory()
         isb_dir = os.path.join(phone_result_dir, "BDS23_ISB")
         os.makedirs(isb_dir, exist_ok=True)
 
@@ -4739,7 +5403,7 @@ to
             # 使用手机文件的结果目录
             phone_file_name = os.path.basename(self.input_file_path)
             phone_file_name_no_ext = os.path.splitext(phone_file_name)[0]
-            phone_result_dir = os.path.join("results", phone_file_name_no_ext)
+            phone_result_dir = self._get_main_result_directory()
 
             # 创建BDS23_ISB子文件夹
             isb_dir = os.path.join(phone_result_dir, "BDS23_ISB")
@@ -5045,29 +5709,84 @@ to
         log_file_path = self._create_isb_log_file()
 
         try:
-            # 检查并使用cleaned2文件作为输入
+            # 按优先级选择输入文件：cleaned2 > cleaned1 > CCI处理 > 多普勒预测 > 原始文件
             phone_file_name = os.path.basename(self.input_file_path)
             phone_file_name_no_ext = os.path.splitext(phone_file_name)[0]
-            phone_result_dir = os.path.join("results", phone_file_name_no_ext)
+            original_ext = os.path.splitext(self.input_file_path)[1]
+            phone_result_dir = self._get_main_result_directory()
             coarse_error_dir = os.path.join(phone_result_dir, "Coarse error")
             
-            # 根据是否启用CCI处理决定文件名
+            # 根据是否启用CCI处理决定基础文件名
             enable_cci = getattr(self, 'enable_cci_processing', True)
             if enable_cci:
-                cci_file_name = f"{phone_file_name_no_ext}-cc inconsistency.25o"
+                base_file_name = f"{phone_file_name_no_ext}-cc inconsistency{original_ext}"
             else:
-                cci_file_name = f"{phone_file_name_no_ext}.25o"
+                # 检查是否有多普勒预测后的文件
+                doppler_dir = os.path.join(phone_result_dir, "doppler prediction")
+                doppler_file_name = f"{phone_file_name_no_ext}-doppler predicted{original_ext}"
+                doppler_file_path = os.path.join(doppler_dir, doppler_file_name)
+                
+                if os.path.exists(doppler_file_path):
+                    base_file_name = f"{phone_file_name_no_ext}-doppler predicted{original_ext}"
+                else:
+                    base_file_name = f"{phone_file_name_no_ext}{original_ext}"
             
-            cleaned2_file_name = f"cleaned2-{cci_file_name}"
+            # 首先尝试使用cleaned2文件（第二阶段剔除后）
+            cleaned2_file_name = f"cleaned2-{base_file_name}"
             cleaned2_file_path = os.path.join(coarse_error_dir, cleaned2_file_name)
+            
+            selected_file = None
+            selected_desc = ""
 
-            # 只有在目录存在时才检查文件
             if os.path.exists(coarse_error_dir) and os.path.exists(cleaned2_file_path):
-                print(f"使用cleaned2文件进行ISB分析: {cleaned2_file_name}")
-                # 重新读取cleaned2文件的数据
-                self.read_rinex_obs(cleaned2_file_path)
+                selected_file = cleaned2_file_path
+                selected_desc = f"cleaned2文件: {cleaned2_file_name}"
             else:
-                print("cleaned2文件不存在，使用原始文件进行ISB分析")
+                # 尝试使用cleaned1文件（第一阶段剔除后）
+                cleaned1_file_name = f"cleaned1-{base_file_name}"
+                cleaned1_file_path = os.path.join(coarse_error_dir, cleaned1_file_name)
+                
+                if os.path.exists(cleaned1_file_path):
+                    selected_file = cleaned1_file_path
+                    selected_desc = f"cleaned1文件: {cleaned1_file_name}"
+                elif enable_cci:
+                    # 尝试使用CCI处理后的文件
+                    cci_dir = os.path.join(phone_result_dir, "code-carrier inconsistency")
+                    cci_file_name = f"{phone_file_name_no_ext}-cc inconsistency{original_ext}"
+                    cci_file_path = os.path.join(cci_dir, cci_file_name)
+                    
+                    if os.path.exists(cci_file_path):
+                        selected_file = cci_file_path
+                        selected_desc = f"CCI处理后文件: {cci_file_name}"
+                    else:
+                        # 检查多普勒预测文件
+                        doppler_dir = os.path.join(phone_result_dir, "doppler prediction")
+                        doppler_file_name = f"{phone_file_name_no_ext}-doppler predicted{original_ext}"
+                        doppler_file_path = os.path.join(doppler_dir, doppler_file_name)
+                        
+                        if os.path.exists(doppler_file_path):
+                            selected_file = doppler_file_path
+                            selected_desc = f"多普勒预测后文件: {doppler_file_name}"
+                        else:
+                            selected_file = self.input_file_path
+                            selected_desc = f"原始文件: {phone_file_name}"
+                else:
+                    # 未启用CCI，检查多普勒预测文件
+                    doppler_dir = os.path.join(phone_result_dir, "doppler prediction")
+                    doppler_file_name = f"{phone_file_name_no_ext}-doppler predicted{original_ext}"
+                    doppler_file_path = os.path.join(doppler_dir, doppler_file_name)
+                    
+                    if os.path.exists(doppler_file_path):
+                        selected_file = doppler_file_path
+                        selected_desc = f"多普勒预测后文件: {doppler_file_name}"
+                    else:
+                        selected_file = self.input_file_path
+                        selected_desc = f"原始文件: {phone_file_name}"
+
+            print(f"使用{selected_desc}进行ISB分析")
+            # 重新读取选定的文件数据
+            if selected_file != self.input_file_path:
+                self.read_rinex_obs(selected_file)
 
             # 第一阶段：数据准备与预处理
             print("\n第一阶段：数据准备与预处理")
@@ -5159,16 +5878,15 @@ to
     def _create_isb_log_file(self) -> str:
         """创建ISB分析日志文件"""
         if not self.current_result_dir:
-            # 设置ISB分析结果目录
-            phone_file_name = os.path.basename(self.input_file_path)
-            phone_file_name_no_ext = os.path.splitext(phone_file_name)[0]
-            base_result_dir = os.path.join("results", phone_file_name_no_ext)
-            self.current_result_dir = os.path.join(base_result_dir, "BDS23_ISB")
+            # 使用新的路径设置方法
+            self._set_result_directory(self.input_file_path)
+            # ISB分析结果放在子目录中
+            self.current_result_dir = os.path.join(self.current_result_dir, "BDS23_ISB")
 
         os.makedirs(self.current_result_dir, exist_ok=True)
 
         # 生成日志文件名（不包含时间戳）
-        log_file_path = os.path.join(self.current_result_dir, "isb_analysis_log.txt")
+        log_file_path = os.path.join(self.current_result_dir, "isb_analysis.log")
 
         # 写入日志文件头
         with open(log_file_path, 'w', encoding='utf-8') as f:
@@ -5176,7 +5894,8 @@ to
             f.write("BDS-2/BDS-3系统间偏差(ISB)分析日志\n")
             f.write("=" * 80 + "\n")
             f.write(f"分析开始时间: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-            f.write(f"手机RINEX文件: {self.input_file_path}\n")
+            f.write(f"手机GNSS数据文件: {os.path.basename(self.input_file_path)}\n")
+            f.write(f"文件完整路径: {self.input_file_path}\n")
             f.write("=" * 80 + "\n\n")
 
         return log_file_path
@@ -5193,14 +5912,15 @@ to
         """生成ISB分析报告"""
         try:
             # 创建报告文件
-            report_file_path = os.path.join(self.current_result_dir, "isb_analysis_report.txt")
+            report_file_path = os.path.join(self.current_result_dir, "isb_analysis_report.log")
 
             with open(report_file_path, 'w', encoding='utf-8') as f:
                 f.write("=" * 80 + "\n")
                 f.write("BDS-2/BDS-3系统间偏差(ISB)分析报告\n")
                 f.write("=" * 80 + "\n")
                 f.write(f"报告生成时间: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-                f.write(f"手机RINEX文件: {self.input_file_path}\n")
+                f.write(f"手机GNSS数据文件: {os.path.basename(self.input_file_path)}\n")
+                f.write(f"文件完整路径: {self.input_file_path}\n")
                 f.write("=" * 80 + "\n\n")
 
                 # 1. 分析概述
@@ -5332,11 +6052,18 @@ to
         # 各观测类型的最大阈值限制（使用用户设置的值）
         max_threshold_limit = self.max_threshold_limits
 
+        # 确定结果目录
+        result_dir = self.current_result_dir if self.current_result_dir else self._get_main_result_directory()
+
         # 初始化日志内容
         log_content = [
             "=" * 70 + "\n",
             "RINEX 粗差处理详细日志\n",
             "=" * 70 + "\n\n",
+            f"处理时间: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n",
+            f"原始输入文件: {os.path.basename(self.input_file_path)}\n",
+            f"文件完整路径: {self.input_file_path}\n",
+            f"结果目录: {result_dir}\n\n",
             f"观测值最大阈值限制: 伪距={max_threshold_limit['code']}m, 相位={max_threshold_limit['phase']}m, 多普勒={max_threshold_limit['doppler']}m/s\n\n"
         ]
 
@@ -5367,26 +6094,74 @@ to
                         )
                     satellite_freq_thresholds[sat_id][freq][obs_type] = threshold
 
-        # 2. 读取RINEX文件内容（优先读取基于伪距相位差值剔除后的文件）
+        # 2. 读取RINEX文件内容（按优先级选择输入文件）
         input_file = self.input_file_path
         phone_file_name = os.path.basename(self.input_file_path)
         phone_file_name_no_ext = os.path.splitext(phone_file_name)[0]
-        phone_result_dir = os.path.join("results", phone_file_name_no_ext)
+        original_ext = os.path.splitext(self.input_file_path)[1]
 
-        # 检查是否存在基于伪距相位差值剔除后的文件
-        coarse_error_dir = os.path.join(phone_result_dir, "Coarse error")
+        # 按优先级选择输入文件：双差剔除 > 粗差剔除 > CCI处理 > 多普勒预测 > 原始文件
+        coarse_error_dir = os.path.join(result_dir, "Coarse error")
+        
+        # 首先检查是否存在基于伪距相位差值剔除后的文件（第一阶段剔除）
         if enable_cci:
-            cci_file_name = f"{phone_file_name_no_ext}-cc inconsistency.25o"
+            base_file_name = f"{phone_file_name_no_ext}-cc inconsistency{original_ext}"
         else:
-            cci_file_name = f"{phone_file_name_no_ext}.25o"
-        cleaned_file_name = f"cleaned1-{cci_file_name}"
+            # 检查是否有多普勒预测后的文件作为基础
+            doppler_dir = os.path.join(result_dir, "doppler prediction")
+            doppler_file_name = f"{phone_file_name_no_ext}-doppler predicted{original_ext}"
+            doppler_file_path = os.path.join(doppler_dir, doppler_file_name)
+            
+            if os.path.exists(doppler_file_path):
+                base_file_name = f"{phone_file_name_no_ext}-doppler predicted{original_ext}"
+            else:
+                base_file_name = f"{phone_file_name_no_ext}{original_ext}"
+                
+        cleaned_file_name = f"cleaned1-{base_file_name}"
         cleaned_file_path = os.path.join(coarse_error_dir, cleaned_file_name)
 
         if os.path.exists(cleaned_file_path):
             input_file = cleaned_file_path
             log_content.append(f"使用基于伪距相位差值剔除后的文件: {cleaned_file_name}\n")
         else:
-            log_content.append(f"使用原始文件: {phone_file_name}\n")
+            # 如果没有第一阶段剔除文件，按优先级选择其他文件
+            if enable_cci:
+                cci_dir = os.path.join(result_dir, "code-carrier inconsistency")
+                cci_file_name = f"{phone_file_name_no_ext}-cc inconsistency{original_ext}"
+                cci_file_path = os.path.join(cci_dir, cci_file_name)
+                
+                if os.path.exists(cci_file_path):
+                    input_file = cci_file_path
+                    log_content.append(f"使用CCI处理后的文件: {cci_file_name}\n")
+                else:
+                    # 检查多普勒预测文件
+                    doppler_dir = os.path.join(result_dir, "doppler prediction")
+                    doppler_file_name = f"{phone_file_name_no_ext}-doppler predicted{original_ext}"
+                    doppler_file_path = os.path.join(doppler_dir, doppler_file_name)
+                    
+                    if os.path.exists(doppler_file_path):
+                        input_file = doppler_file_path
+                        log_content.append(f"使用多普勒预测后的文件: {doppler_file_name}\n")
+                    else:
+                        log_content.append(f"使用原始文件: {phone_file_name}\n")
+            else:
+                # 未启用CCI，检查多普勒预测文件
+                doppler_dir = os.path.join(result_dir, "doppler prediction")
+                doppler_file_name = f"{phone_file_name_no_ext}-doppler predicted{original_ext}"
+                doppler_file_path = os.path.join(doppler_dir, doppler_file_name)
+                
+                if os.path.exists(doppler_file_path):
+                    input_file = doppler_file_path
+                    log_content.append(f"使用多普勒预测后的文件: {doppler_file_name}\n")
+                else:
+                    log_content.append(f"使用原始文件: {phone_file_name}\n")
+
+        # 添加实际使用的文件详细信息
+        log_content.append(f"\n实际处理的RINEX文件信息:\n")
+        log_content.append(f"文件名: {os.path.basename(input_file)}\n")
+        log_content.append(f"完整路径: {input_file}\n")
+        log_content.append(f"文件大小: {os.path.getsize(input_file) / 1024:.2f} KB\n")
+        log_content.append(f"文件修改时间: {datetime.datetime.fromtimestamp(os.path.getmtime(input_file)).strftime('%Y-%m-%d %H:%M:%S')}\n\n")
 
         with open(input_file, 'r', encoding='utf-8') as f:
             lines = f.readlines()
@@ -5546,9 +6321,9 @@ to
 
         # 7. 保存修改后的文件
         if enable_cci:
-            base_name = f"{phone_file_name_no_ext}-cc inconsistency.25o"
+            base_name = f"{phone_file_name_no_ext}-cc inconsistency{original_ext}"
         else:
-            base_name = f"{phone_file_name_no_ext}.25o"
+            base_name = f"{phone_file_name_no_ext}{original_ext}"
         modified_file_name = f"cleaned2-{base_name}"
         output_path = os.path.join(coarse_error_dir, modified_file_name)
 
@@ -6020,11 +6795,22 @@ to
         self.start_stage(7, "保存分析报告", 100)
 
         report = self.generate_report()
-        filename = "analysis_report.txt"
+        filename = "analysis_report.log"
         full_path = os.path.join(self.current_result_dir, filename)
 
+        # 在报告开头添加文件信息
+        enhanced_report = (
+            f"GNSS观测数据分析报告\n"
+            f"=" * 60 + "\n"
+            f"报告生成时间: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+            f"手机GNSS数据文件: {os.path.basename(self.input_file_path)}\n"
+            f"文件完整路径: {self.input_file_path}\n"
+            f"=" * 60 + "\n\n"
+            f"{report}"
+        )
+
         with open(full_path, 'w', encoding='utf-8') as f:
-            f.write(report)
+            f.write(enhanced_report)
 
         self.update_progress(100)
         print(f"--报告已保存至: {full_path}")
