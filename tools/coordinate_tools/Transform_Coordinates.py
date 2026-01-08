@@ -173,6 +173,48 @@ def save_results(file_path, avg_lat, avg_lon, avg_height, avg_X, avg_Y, avg_Z):
         return None
 
 
+def show_line_selection_dialog(lines):
+    """
+    弹出窗口让用户选择要处理的行，返回所选行的索引列表
+    """
+    import tkinter as tk
+    selected_indices = []
+    def on_ok():
+        nonlocal selected_indices
+        selected_indices = list(listbox.curselection())
+        win.destroy()
+
+    win = tk.Toplevel()
+    win.title("选择要处理的数据行")
+    win.geometry("700x500")  # 增加窗口高度
+    tk.Label(win, text="请选择要处理的行（可多选）：").pack(pady=(10, 0))
+    frame = tk.Frame(win)
+    frame.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+    scrollbar = tk.Scrollbar(frame)
+    scrollbar.pack(side="right", fill="y")
+    listbox = tk.Listbox(frame, selectmode=tk.MULTIPLE, width=100, height=20, yscrollcommand=scrollbar.set)
+    for idx, line in enumerate(lines):
+        listbox.insert(tk.END, f"{idx+1}: {line.strip()}")
+    listbox.pack(side="left", fill="both", expand=True)
+    scrollbar.config(command=listbox.yview)
+
+    # 按钮区域，横向布局，居中显示
+    btn_frame = tk.Frame(win)
+    btn_frame.pack(pady=10, fill="x")
+    btn_frame.grid_columnconfigure(0, weight=1)
+    btn_frame.grid_columnconfigure(1, weight=1)
+    def select_all():
+        listbox.select_set(0, tk.END)
+    btn_select_all = tk.Button(btn_frame, text="选择全部", command=select_all, width=16)
+    btn_select_all.grid(row=0, column=0, padx=40)
+    btn_ok = tk.Button(btn_frame, text="确定", command=on_ok, width=16)
+    btn_ok.grid(row=0, column=1, padx=40)
+
+    win.grab_set()
+    win.wait_window()
+    return selected_indices
+
+
 if __name__ == "__main__":
     root = tk.Tk()
     root.withdraw()
@@ -184,7 +226,34 @@ if __name__ == "__main__":
     if file_paths:
         for file_path in file_paths:
             print(f"\n处理文件: {file_path}")
-            measurements = read_data_from_file(file_path)
+            # 先读取所有原始行
+            encodings = ['gbk', 'utf-8']
+            lines = []
+            for encoding in encodings:
+                try:
+                    with open(file_path, 'r', encoding=encoding) as f:
+                        lines = f.readlines()
+                    break
+                except UnicodeDecodeError:
+                    continue
+            if not lines:
+                print(f"无法读取文件: {file_path}")
+                continue
+            # 弹窗让用户选择要处理的行
+            selected_indices = show_line_selection_dialog(lines)
+            if not selected_indices:
+                print(f"未选择任何行，跳过文件: {file_path}")
+                continue
+            # 只处理选中的行
+            selected_lines = [lines[i] for i in selected_indices]
+            # 将选中的行写入临时文件，复用原有读取逻辑
+            import tempfile
+            with tempfile.NamedTemporaryFile('w+', delete=False, encoding='utf-8') as tmpf:
+                for line in selected_lines:
+                    tmpf.write(line)
+                tmpf_path = tmpf.name
+            measurements = read_data_from_file(tmpf_path)
+            os.remove(tmpf_path)
             if measurements:
                 avg_lat, avg_lon, avg_height, avg_X, avg_Y, avg_Z = average_coordinates(measurements)
 
