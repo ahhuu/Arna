@@ -18,20 +18,19 @@
 import math
 import os
 import tkinter as tk
-from datetime import datetime
+from datetime import datetime, timezone
 from tkinter import filedialog
 from tkinter import ttk, messagebox
-import logging  # 新增：日志模块
-import traceback  # 新增：异常追踪
-import re  # 新增：正则表达式
+import logging
+import traceback
+import re
 
-# -------------------- 日志配置 --------------------
 logging.basicConfig(
     level=logging.DEBUG,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.StreamHandler(),  # 输出到控制台
-        logging.FileHandler('gnss_converter.log', mode='a')  # 保存到日志文件
+        logging.StreamHandler(),
+        logging.FileHandler('gnss_converter.log', mode='a')
     ]
 )
 logger = logging.getLogger(__name__)
@@ -64,20 +63,21 @@ RNX_END = "                                                            END OF HE
 
 # Measurement states
 GPS_MEASUREMENT_STATE_UNKNOWN = 0
-STATE_CODE_LOCK = 1  # 2^0
-STATE_TOW_KNOWN = 8  # 2^3
+STATE_CODE_LOCK = 1 << 0
+STATE_TOW_KNOWN = 1 << 3
 
-STATE_GLO_STRING_SYNC = 64  # 2^6
-STATE_GLO_TOD_KNOWN = 128  # 2^7
+STATE_GLO_STRING_SYNC = 1 << 6
+STATE_GLO_TOD_KNOWN = 1 << 7
 
-STATE_GAL_E1C_2ND_CODE_LOCK = 2048  # 2^11
-STATE_GAL_E1BC_CODE_LOCK = 1024  # 2^10
-STATE_GAL_E1B_PAGE_SYNC = 4096  # 2^12
+STATE_GAL_E1C_2ND_CODE_LOCK = 1 << 11
+STATE_GAL_E1BC_CODE_LOCK = 1 << 10
+STATE_GAL_E1B_PAGE_SYNC = 1 << 12
 
-GPS_ADR_STATE_UNKNOWN = 0
-GPS_ADR_STATE_VALID = 1  # 2^0
-GPS_ADR_STATE_RESET = 2  # 2^1
-GPS_ADR_STATE_CYCLE_SLIP = 4  # 2^2
+ADR_STATE_VALID = 1 << 0                # 1: 载波相位有效
+ADR_STATE_RESET = 1 << 1                # 2: 载波相位重置
+ADR_STATE_CYCLE_SLIP = 1 << 2           # 4: 检测到周跳
+ADR_STATE_HALF_CYCLE_RESOLVED = 1 << 3  # 8: 半周模糊度已解算
+ADR_STATE_HALF_CYCLE_REPORTED = 1 << 4  # 16: 存在半周模糊度
 
 NEAR_ZERO = 0.0001  # Threshold to judge if a float equals 0
 
@@ -172,8 +172,6 @@ class GnssSat:
 
         # 信号属性
         self.agc_db = float(parts[29])
-        # 移除carrier_frequency_hz2映射
-        # self.carrier_frequency_hz2 = float(parts[30])
         self.baseband_cn0_db_hz = float(parts[30])
         self.full_inter_signal_bias_nanos = float(parts[31])
         self.full_inter_signal_bias_uncertainty_nanos = float(parts[32])
@@ -185,7 +183,7 @@ class GnssSat:
         self.signal_name = ""
 
     def print_frequency_and_signal(self):
-        """输出载波频率和信号名称，用于调试"""
+        """输出载波频率和信号名称--调试"""
         print(f"SVID: {self.svid}, Constellation: {self.constellation_type}")
         print(f"Carrier Frequency: {self.carrier_frequency_hz} Hz")
         print(f"Code Type: {self.code_type}")
@@ -211,6 +209,8 @@ class RnxSat:
         self.l = [0.0] * MAX_FRQ
         self.d = [0.0] * MAX_FRQ
         self.s = [0.0] * MAX_FRQ
+        # 对应每个频点的 LLI 值（0=无，1=半周，2=周跳，可按位或）
+        self.l_lli = [0] * MAX_FRQ
 
 
 class RnxEpoch:
@@ -263,7 +263,7 @@ def parse_manufacturer_model(file_path):
             m = pattern.search(line)
             if m:
                 return m.group(1), m.group(2)
-    return '', ''  # 未找到时返回空
+    return '', ''
 
 
 def parse_xyz_from_raw(raw_lines):
@@ -279,7 +279,7 @@ def parse_xyz_from_raw(raw_lines):
                 return latlonh_to_xyz(lat, lon, h)
             except Exception:
                 continue
-    return None  # 未找到有效Fix行
+    return None
 
 
 def latlonh_to_xyz(lat_deg, lon_deg, h_m):
@@ -363,9 +363,10 @@ def print_rnx_epoch(fp, epoch):
             else:
                 fp.write("                ")
 
-            # Carrier phase (L)
+            # Carrier phase (L) with LLI formatting: 14-char value + 1-char LLI + 1-char SSI(blank)
             if sat.l[i]:
-                fp.write("{:16.3f}".format(sat.l[i]))
+                lli_char = str(sat.l_lli[i]) if hasattr(sat, 'l_lli') else ' '
+                fp.write(f"{sat.l[i]:14.3f}{lli_char} ")
             else:
                 fp.write("                ")
 
@@ -445,7 +446,7 @@ def main():
     # 选择多个输入文件
     input_files = filedialog.askopenfilenames(
         title="选择输入文件（支持多选）",
-        filetypes=[("文本文件", "*.txt"), ("所有文件", "*.*")]
+        filetypes=(("文本文件", "*.txt"), ("所有文件", "*.*"))
     )
     if not input_files:
         messagebox.showinfo("提示", "未选择输入文件，程序终止")
@@ -480,7 +481,7 @@ def main():
     status_label = tk.Label(progress_window, text="准备处理...", font=("Arial", 10))
     status_label.pack(pady=10)
 
-    # 计算总进度（每个文件为一个进度单位）
+    # 计算总进度
     total_files = len(input_files)
     progress_per_file = 100 / total_files
 
@@ -525,11 +526,18 @@ def main():
                         epoch = GnssEpoch()
                         sat = GnssSat()
                         sat.parse_from(line)
+
+                        # 早期数据清洗：三项不确定度阈值任一超限则丢弃该行
+                        if (sat.pseudorange_rate_uncertainty_meter_per_second > MAXPRRUNCMPS or
+                                sat.received_sv_time_uncertainty_nano > MAXTOWUNCNS or
+                                sat.accumulated_delta_range_uncertainty_meter > MAXADRUNCNS):
+                            continue
+
                         # sat.print_frequency_and_signal()
                         epoch.obs = sat
                         epochs.append(epoch)
 
-                    # 更新文件内处理进度（每100行更新一次，避免频繁更新）
+                    # 更新文件内处理进度
                     if j % 100 == 0:
                         file_progress = (j / total_lines) * progress_per_file
                         current_progress = i * progress_per_file + file_progress
@@ -639,7 +647,7 @@ def main():
                     check_clkdisc = sat.hardware_clock_discontinuity_count
                     if abs(check_clkdisc - check_clkdiscp) > NEAR_ZERO:
                         clock_jump_count += 1
-                        time_str = datetime.utcfromtimestamp(sat.time_nano / 1e9).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+                        time_str = datetime.fromtimestamp(sat.time_nano / 1e9, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
                         logger.debug(
                             f"时钟跳变 #{clock_jump_count} 检测到并处理: 时间={time_str}, 计数器值 {check_clkdiscp} → {check_clkdisc}")
                         check_clkdiscp = check_clkdisc
@@ -744,17 +752,29 @@ def main():
                 # Store observations
                 existing_sat.p[frq] = pr_second * CLIGHT  # Pseudorange
                 existing_sat.d[frq] = -sat.pseudorange_rate_meter_per_second * wavl_inv  # Doppler
-                existing_sat.l[frq] = sat.accumulated_delta_range_meter * wavl_inv  # Carrier phase
-                existing_sat.s[frq] = sat.cn0_dbhz  # C/N0
 
-                if sat.accumulated_delta_range_state & GPS_ADR_STATE_UNKNOWN:
-                    existing_sat.l[frq] = 0
+                # 载波相位有效性检查：无效则不输出相位值
+                lli_val = 0
+                adr_state = sat.accumulated_delta_range_state
+                if adr_state & ADR_STATE_VALID:
+                    existing_sat.l[frq] = sat.accumulated_delta_range_meter * wavl_inv  # Carrier phase
+                else:
+                    existing_sat.l[frq] = 0.0
+
+                # LLI 计算：半周和周跳
+                if (adr_state & ADR_STATE_HALF_CYCLE_REPORTED) and not (adr_state & ADR_STATE_HALF_CYCLE_RESOLVED):
+                    lli_val |= 1
+                if adr_state & ADR_STATE_CYCLE_SLIP:
+                    lli_val |= 2
+                existing_sat.l_lli[frq] = lli_val
+
+                # 信噪比
+                existing_sat.s[frq] = sat.cn0_dbhz  # C/N0
 
             # Add the last epoch
             rnx.append(repoch)
 
             # Build RINEX file
-            # 使用用户选择的目录和默认文件名（基于输入文件名）
             input_basename = os.path.splitext(os.path.basename(input_file))[0]
             default_output_name = os.path.join(OUTPUT_DIR, input_basename)
             dir_name, file_name = os.path.split(default_output_name)
@@ -785,7 +805,6 @@ def main():
             # 添加保存成功提示
             status_label.config(text=f"已成功保存: {os.path.basename(rinex_name)}")
             progress_window.update()
-            print("===============================================================================================")
 
         except Exception as e:
             logger.error(f"处理文件 {input_file} 时发生错误: {str(e)}\n{traceback.format_exc()}")
@@ -798,7 +817,7 @@ def main():
     status_label.config(text="处理完成!")
     progress_window.update()
 
-    # 显示完成提示（使用进度窗口的消息框，避免依赖主窗口）
+    # 显示完成提示
     messagebox.showinfo("完成", f"已成功处理 {len(input_files)} 个文件", parent=progress_window)
 
     # 延迟关闭进度窗口，并退出程序
@@ -806,7 +825,7 @@ def main():
         progress_window.destroy()
         root.destroy()  # 销毁主窗口，避免残留进程
 
-    progress_window.after(1000, close_window)
+    progress_window.after(1000, lambda: close_window())
 
 
 def find_signal(sys, sig):
