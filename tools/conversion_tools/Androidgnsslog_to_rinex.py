@@ -37,7 +37,7 @@ logger = logging.getLogger(__name__)
 
 # Constants
 CLIGHT = 299792458.0  # Speed of light (m/s)
-LeapSecond = 18  # Leap second for 2021
+LeapSecond = 18  # Leap second for 2026
 
 MAXPRRUNCMPS = 10   # Maximum pseudorange rate (Doppler) uncertainty, 10 m/s, for example
 MAXTOWUNCNS = 500   # Maximum Tow uncertainty, 500 ns, for example
@@ -64,15 +64,20 @@ RNX_END = "                                                            END OF HE
 # Measurement states
 GPS_MEASUREMENT_STATE_UNKNOWN = 0
 STATE_CODE_LOCK = 1 << 0
-STATE_TOW_KNOWN = 1 << 3
+STATE_TOW_DECODED = 1 << 3
+STATE_MSEC_AMBIGUOUS = 1 << 4
 
 STATE_GLO_STRING_SYNC = 1 << 6
-STATE_GLO_TOD_KNOWN = 1 << 7
+STATE_GLO_TOD_DECODED = 1 << 7
 
 STATE_GAL_E1C_2ND_CODE_LOCK = 1 << 11
 STATE_GAL_E1BC_CODE_LOCK = 1 << 10
 STATE_GAL_E1B_PAGE_SYNC = 1 << 12
 
+STATE_BDS_D2_BIT_SYNC = 1 << 8
+STATE_BDS_D2_SUBFRAME_SYNC = 1 << 9
+
+ADR_STATE_Unknown = 0                   # 0: 载波相位无效或状态未知
 ADR_STATE_VALID = 1 << 0                # 1: 载波相位有效
 ADR_STATE_RESET = 1 << 1                # 2: 载波相位重置
 ADR_STATE_CYCLE_SLIP = 1 << 2           # 4: 检测到周跳
@@ -85,8 +90,8 @@ NEAR_ZERO = 0.0001  # Threshold to judge if a float equals 0
 class GnssSat:
     def __init__(self):
         # 基础时间属性
-        self.ss = ""  # 原始数据标识
-        self.ElapsedRealtimeMillis = 0  # UTC时间戳(毫秒)
+        self.Raw = ""  # 原始数据标识
+        self.utc_time_millis = 0  # UTC时间戳(毫秒)
         self.time_nano = 0  # 系统时间(纳秒)
         self.leap_second = 0  # 闰秒数
         self.time_uncertainty_nano = 0.0  # 时间不确定度(纳秒)
@@ -138,8 +143,8 @@ class GnssSat:
         parts = [p if p != '' else '0' for p in parts]
 
         # 基础时间属性
-        self.ss = parts[0]
-        self.ElapsedRealtimeMillis = int(parts[1])
+        self.Raw = parts[0]
+        self.utc_time_millis = int(parts[1])
         self.time_nano = int(parts[2])
         self.leap_second = int(parts[3])
         self.time_uncertainty_nano = float(parts[4])
@@ -367,6 +372,7 @@ def print_rnx_epoch(fp, epoch):
             if sat.l[i]:
                 lli_char = str(sat.l_lli[i]) if hasattr(sat, 'l_lli') else ' '
                 fp.write(f"{sat.l[i]:14.3f}{lli_char} ")
+               #  fp.write("{:16.3f}".format(sat.l[i]))
             else:
                 fp.write("                ")
 
@@ -526,13 +532,6 @@ def main():
                         epoch = GnssEpoch()
                         sat = GnssSat()
                         sat.parse_from(line)
-
-                        # 早期数据清洗：三项不确定度阈值任一超限则丢弃该行
-                        if (sat.pseudorange_rate_uncertainty_meter_per_second > MAXPRRUNCMPS or
-                                sat.received_sv_time_uncertainty_nano > MAXTOWUNCNS or
-                                sat.accumulated_delta_range_uncertainty_meter > MAXADRUNCNS):
-                            continue
-
                         # sat.print_frequency_and_signal()
                         epoch.obs = sat
                         epochs.append(epoch)
@@ -661,16 +660,29 @@ def main():
 
                 # Check observation availability
                 available = False
-                if sat.sys in [SYS_GPS, SYS_BDS, SYS_QZS]:
-                    available = (sat.state & STATE_CODE_LOCK) and (sat.state & STATE_TOW_KNOWN)
-                    if round(sat.carrier_frequency_hz / 1e4) == 117645:
-                        available = sat.state & STATE_CODE_LOCK
-                elif sat.sys == SYS_GLO:
-                    available = (sat.state & STATE_GLO_STRING_SYNC) and (sat.state & STATE_GLO_TOD_KNOWN)
-                elif sat.sys == SYS_GAL:
-                    available = ((sat.state & STATE_GAL_E1C_2ND_CODE_LOCK) or (sat.state & STATE_GAL_E1BC_CODE_LOCK))
-                    if round(sat.carrier_frequency_hz / 1e4) == 117645:
-                        available = sat.state & STATE_TOW_KNOWN
+
+                # 1. MSEC AMBIGUOUS
+                if (sat.state & STATE_MSEC_AMBIGUOUS) != 0:
+                    available = False
+                else:
+                    # 2. TOW/TOD
+                    tow_decoded = False
+                    if sat.sys == SYS_GLO:
+                        tow_decoded = (sat.state & STATE_GLO_TOD_DECODED) != 0
+                    else:
+                        tow_decoded = (sat.state & STATE_TOW_DECODED) != 0
+
+                    if not tow_decoded:
+                        available = False
+                    else:
+                        # 3. CODE LOCK
+                        if sat.sys in [SYS_GPS, SYS_BDS, SYS_QZS]:
+                            available = (sat.state & STATE_CODE_LOCK) != 0
+                        elif sat.sys == SYS_GLO:
+                            available = (sat.state & STATE_GLO_STRING_SYNC) != 0
+                        elif sat.sys == SYS_GAL:
+                            available = ((sat.state & STATE_GAL_E1BC_CODE_LOCK) != 0) or \
+                                        ((sat.state & STATE_GAL_E1C_2ND_CODE_LOCK) != 0)
 
                 if not available:
                     continue  # Reject bad observations with invalid state
@@ -756,6 +768,7 @@ def main():
                 # 载波相位有效性检查：无效则不输出相位值
                 lli_val = 0
                 adr_state = sat.accumulated_delta_range_state
+
                 if adr_state & ADR_STATE_VALID:
                     existing_sat.l[frq] = sat.accumulated_delta_range_meter * wavl_inv  # Carrier phase
                 else:
