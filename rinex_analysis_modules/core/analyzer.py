@@ -4296,51 +4296,57 @@ class GNSSAnalyzer:
 
     def calculate_triple_median_error(self, double_diffs):
         """计算双差结果的三倍中误差并检测超限值（包含伪距、相位、多普勒）"""
-        triple_errors = {}  # 存储三倍中误差及超限值 {sat_id: {freq: {threshold: float, outliers: list}}}
-
+        # triple_errors = {}  # 存储三倍中误差及超限值 {sat_id: {freq: {threshold: float, outliers: list}}}
+        # for sat_id, freq_data in double_diffs.items():
+        #     triple_errors[sat_id] = {}
+        #     for freq, dd_data in freq_data.items():
+        #         # 提取双差观测值（过滤无效值）
+        #         code = np.array([v for v in dd_data['dd_code'] if v is not None and not np.isnan(v)])
+        #         phase = np.array([v for v in dd_data['dd_phase'] if v is not None and not np.isnan(v)])
+        #         doppler = np.array([v for v in dd_data['dd_doppler'] if v is not None and not np.isnan(v)])
+        #         # 计算中误差（使用标准差）
+        #         def std_error(arr):
+        #             if len(arr) < 2:  # 至少需要两个观测值计算标准差
+        #                 return 0
+        #             return np.std(arr, ddof=1)  # 样本标准差（自由度n-1）
+        #         # 伪距双差
+        #         if len(code) > 1:
+        #             sigma_code = std_error(code)
+        #             triple_sigma_code = 3 * sigma_code if sigma_code != 0 else 0.1  # 三倍中误差
+        #             outliers_code = np.where(np.abs(dd_data['dd_code']) > triple_sigma_code)[0].tolist()  # 超限索引
+        #         else:
+        #             triple_sigma_code, outliers_code = 0, []
+        #         # 载波相位双差
+        #         if len(phase) > 1:
+        #             sigma_phase = std_error(phase)
+        #             triple_sigma_phase = 3 * sigma_phase if sigma_phase != 0 else 0.01  # 相位精度更高，阈值更小
+        #             outliers_phase = np.where(np.abs(dd_data['dd_phase']) > triple_sigma_phase)[0].tolist()
+        #         else:
+        #             triple_sigma_phase, outliers_phase = 0, []
+        #         # 多普勒双差
+        #         if len(doppler) > 1:
+        #             sigma_doppler = std_error(doppler)
+        #             triple_sigma_doppler = 3 * sigma_doppler if sigma_doppler != 0 else 0.05  # 多普勒阈值
+        #             outliers_doppler = np.where(np.abs(dd_data['dd_doppler']) > triple_sigma_doppler)[0].tolist()
+        #         else:
+        #             triple_sigma_doppler, outliers_doppler = 0, []
+        #         # 合并结果
+        #         triple_errors[sat_id][freq] = {
+        #             'code': {'threshold': triple_sigma_code, 'outliers': outliers_code},
+        #             'phase': {'threshold': triple_sigma_phase, 'outliers': outliers_phase},
+        #             'doppler': {'threshold': triple_sigma_doppler, 'outliers': outliers_doppler}
+        #         }
+        # self.results['triple_median_errors'] = triple_errors
+        # return triple_errors
+        # 仅保留空结构，兼容调用
+        triple_errors = {}
         for sat_id, freq_data in double_diffs.items():
             triple_errors[sat_id] = {}
-            for freq, dd_data in freq_data.items():
-                # 提取双差观测值（过滤无效值）
-                code = np.array([v for v in dd_data['dd_code'] if v is not None and not np.isnan(v)])
-                phase = np.array([v for v in dd_data['dd_phase'] if v is not None and not np.isnan(v)])
-                doppler = np.array([v for v in dd_data['dd_doppler'] if v is not None and not np.isnan(v)])
-
-                # 计算中误差（使用标准差）
-                def std_error(arr):
-                    if len(arr) < 2:  # 至少需要两个观测值计算标准差
-                        return 0
-                    return np.std(arr, ddof=1)  # 样本标准差（自由度n-1）
-
-                # 伪距双差
-                if len(code) > 1:
-                    sigma_code = std_error(code)
-                    triple_sigma_code = 3 * sigma_code if sigma_code != 0 else 0.1  # 三倍中误差
-                    outliers_code = np.where(np.abs(dd_data['dd_code']) > triple_sigma_code)[0].tolist()  # 超限索引
-                else:
-                    triple_sigma_code, outliers_code = 0, []
-
-                # 载波相位双差
-                if len(phase) > 1:
-                    sigma_phase = std_error(phase)
-                    triple_sigma_phase = 3 * sigma_phase if sigma_phase != 0 else 0.01  # 相位精度更高，阈值更小
-                    outliers_phase = np.where(np.abs(dd_data['dd_phase']) > triple_sigma_phase)[0].tolist()
-                else:
-                    triple_sigma_phase, outliers_phase = 0, []
-
-                # 多普勒双差
-                if len(doppler) > 1:
-                    sigma_doppler = std_error(doppler)
-                    triple_sigma_doppler = 3 * sigma_doppler if sigma_doppler != 0 else 0.05  # 多普勒阈值
-                    outliers_doppler = np.where(np.abs(dd_data['dd_doppler']) > triple_sigma_doppler)[0].tolist()
-                else:
-                    triple_sigma_doppler, outliers_doppler = 0, []
-
-                # 合并结果
+            for freq in freq_data.keys():
                 triple_errors[sat_id][freq] = {
-                    'code': {'threshold': triple_sigma_code, 'outliers': outliers_code},
-                    'phase': {'threshold': triple_sigma_phase, 'outliers': outliers_phase},
-                    'doppler': {'threshold': triple_sigma_doppler, 'outliers': outliers_doppler}
+                    'code': {'threshold': 0, 'outliers': []},
+                    'phase': {'threshold': 0, 'outliers': []},
+                    'doppler': {'threshold': 0, 'outliers': []}
                 }
 
         self.results['triple_median_errors'] = triple_errors
