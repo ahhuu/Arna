@@ -6,4 +6,4 @@ RINEX分析模块包
 """
 
 __version__ = "1.0.0"
-__author__ = "RINEX Analysis Team"
+__author__ = "CZ"

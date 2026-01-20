@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-GNSS RINEX数据分析器 - 模块化版本
+Android GNSS RINEX数据分析器 - 模块化版本
 主入口文件
 """
 
