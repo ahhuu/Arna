@@ -232,7 +232,7 @@ class GNSSAnalysisGUI:
     def browse_file(self, var, file_type):
         """文件浏览对话框"""
         if file_type == "RINEX":
-            filetypes = [("RINEX files", "*.25o *.25O *.obs *.rnx"), ("All files", "*.*")]
+            filetypes = [("RINEX files", "*.??o *.??O *.obs *.rnx"), ("All files", "*.*")]
         elif file_type == "TXT":
             filetypes = [("Text files", "*.txt"), ("All files", "*.*")]
         elif file_type == "CSV":
