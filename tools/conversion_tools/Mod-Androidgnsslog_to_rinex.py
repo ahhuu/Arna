@@ -247,6 +247,71 @@ def qzss_prn_mapping(svid):
     return svid - 192  # Default mapping
 
 
+def get_smart_signal_code(sys, carrier_freq_hz, android_code_type):
+    """
+    根据频率确定波段号，直接拼装 Android CodeType
+    """
+    # 1. 预处理
+    freq_mhz = round(carrier_freq_hz / 1e5) / 10.0
+    raw_code = android_code_type if android_code_type else ""
+
+    # 2. 定义波段号 (Band ID) 和 默认码 (Default)
+    band_id = ""
+    default_attr = ""
+
+    # ---  BDS B1I (1561.098 MHz) ---
+    # RINEX 3.04+ 规定 B1I 为 B2I
+    if sys == SYS_BDS and abs(freq_mhz - 1561.1) < 1.0:
+        band_id = "2"
+        default_attr = "I"
+
+    # --- L1 / E1 / B1C / G1 ---
+    elif abs(freq_mhz - 1575.4) < 1.0 or (sys == SYS_GLO and 1590 < freq_mhz < 1615):
+        band_id = "1"
+        if sys == SYS_BDS:
+            default_attr = "P"
+        else:
+            default_attr = "C"
+
+    # --- L5 / E5a / B2a ---
+    elif abs(freq_mhz - 1176.4) < 1.0:
+        band_id = "5"
+        if sys == SYS_BDS:
+            default_attr = "P"
+        else:
+            default_attr = "Q"
+
+    # --- L2 / G2 ---
+    elif abs(freq_mhz - 1227.6) < 1.0 or (sys == SYS_GLO and 1230 < freq_mhz < 1260):
+        band_id = "2"
+        default_attr = "C"  # G2 默认为 2C (或者 2P，视接收机而定，消费级多为2C)
+
+    # --- E5b / B2b ---
+    elif abs(freq_mhz - 1207.1) < 1.0:
+        band_id = "7"
+        if sys == SYS_BDS:
+            default_attr = "I"
+        else:
+            default_attr = "Q"
+
+    # --- B3I ---
+    elif abs(freq_mhz - 1268.5) < 1.0:
+        band_id = "6"
+        default_attr = "I"  # 6I
+
+    if not band_id:
+        return None
+
+    # 核心逻辑：直接使用code_type
+    final_attr = raw_code if raw_code else default_attr
+
+    # 3. BDS B2a 修正
+    if sys == SYS_BDS and band_id == "5" and final_attr == "Q":
+        final_attr = "P"  # 强制修正为 5P
+
+    return f"{band_id}{final_attr}"
+
+
 def compare_sats(a, b):
     # Define system priority order: G(1), R(3), E(6), C(5), J(4)
     priority_a = (1 if a.sys == 1 else
@@ -608,77 +673,91 @@ def main():
                         glonass_freq_map[sat.svid] = k
                 # ---------------------------------------------
 
-                # --- MODIFIED: Signal Identification Logic (RINEX 3.05) ---
-                # Determine system and signal type
-                if sat.constellation_type == 1:  # GPS
-                    # Use rounded freq logic for robust matching
-                    freq_mhz = round(sat.carrier_frequency_hz / 1e5) / 10.0
-                    if abs(freq_mhz - 1575.4) < 1.0:
-                        sat.sys = SYS_GPS
-                        sat.signal_name = "1C" # was L1C
-                        add_signal(SYS_GPS, sat.signal_name)
-                    elif abs(freq_mhz - 1176.4) < 1.0:
-                        sat.sys = SYS_GPS
-                        sat.signal_name = "5Q" # was L5Q
-                        add_signal(SYS_GPS, sat.signal_name)
-                elif sat.constellation_type == 3:  # GLO
-                    freq_mhz = sat.carrier_frequency_hz / 1e6
-                    if 1590 < freq_mhz < 1615:
-                        sat.sys = SYS_GLO
-                        sat.signal_name = "1C" # was L1C
-                        add_signal(SYS_GLO, sat.signal_name)
-                    # Add G2 if needed:
-                    elif 1230 < freq_mhz < 1260:
-                        sat.sys = SYS_GLO
-                        sat.signal_name = "2C"
-                        add_signal(SYS_GLO, sat.signal_name)
-                elif sat.constellation_type == 5:  # BDS
-                    freq_mhz = round(sat.carrier_frequency_hz / 1e5) / 10.0
-                    if abs(freq_mhz - 1561.1) < 1.0: # B1I (1561.098)
-                        sat.sys = SYS_BDS
-                        sat.signal_name = "2I" # MODIFIED: B2I -> 2I
-                        add_signal(SYS_BDS, sat.signal_name)
-                    elif abs(freq_mhz - 1575.4) < 1.0: # B1C
-                        sat.sys = SYS_BDS
-                        sat.signal_name = "1P" # MODIFIED: B1C -> 1P
-                        add_signal(SYS_BDS, sat.signal_name)
-                    elif abs(freq_mhz - 1176.4) < 1.0: # B2a
-                        sat.sys = SYS_BDS
-                        sat.signal_name = "5P" # MODIFIED: B2a -> 5P
-                        add_signal(SYS_BDS, sat.signal_name)
-                    elif abs(freq_mhz - 1207.1) < 1.0: # B2b
-                        sat.sys = SYS_BDS
-                        sat.signal_name = "7I"
-                        add_signal(SYS_BDS, sat.signal_name)
-                    elif abs(freq_mhz - 1268.5) < 1.0: # B3I
-                        sat.sys = SYS_BDS
-                        sat.signal_name = "6I"
-                        add_signal(SYS_BDS, sat.signal_name)
-                elif sat.constellation_type == 6:  # GAL
-                    freq_mhz = round(sat.carrier_frequency_hz / 1e5) / 10.0
-                    if abs(freq_mhz - 1575.4) < 1.0:
-                        sat.sys = SYS_GAL
-                        sat.signal_name = "1C" # E1C
-                        add_signal(SYS_GAL, sat.signal_name)
-                    elif abs(freq_mhz - 1176.4) < 1.0:
-                        sat.sys = SYS_GAL
-                        sat.signal_name = "5Q" # E5Q
-                        add_signal(SYS_GAL, sat.signal_name)
-                    elif abs(freq_mhz - 1207.1) < 1.0:
-                        sat.sys = SYS_GAL
-                        sat.signal_name = "7Q" # E7Q
-                        add_signal(SYS_GAL, sat.signal_name)
-                elif sat.constellation_type == 4:  # QZSS
-                    freq_mhz = round(sat.carrier_frequency_hz / 1e5) / 10.0
-                    if abs(freq_mhz - 1575.4) < 1.0:
-                        sat.sys = SYS_QZS
-                        sat.signal_name = "1C"
-                        add_signal(SYS_QZS, sat.signal_name)
-                    elif abs(freq_mhz - 1176.4) < 1.0:
-                        sat.sys = SYS_QZS
-                        sat.signal_name = "5Q"
-                        add_signal(SYS_QZS, sat.signal_name)
-                # --------------------------------------------------------
+                # # --- MODIFIED: Signal Identification Logic (RINEX 3.05) ---
+                # # Determine system and signal type
+                # if sat.constellation_type == 1:  # GPS
+                #     # Use rounded freq logic for robust matching
+                #     freq_mhz = round(sat.carrier_frequency_hz / 1e5) / 10.0
+                #     if abs(freq_mhz - 1575.4) < 1.0:
+                #         sat.sys = SYS_GPS
+                #         sat.signal_name = "1C" # was L1C
+                #         add_signal(SYS_GPS, sat.signal_name)
+                #     elif abs(freq_mhz - 1176.4) < 1.0:
+                #         sat.sys = SYS_GPS
+                #         sat.signal_name = "5Q" # was L5Q
+                #         add_signal(SYS_GPS, sat.signal_name)
+                # elif sat.constellation_type == 3:  # GLO
+                #     freq_mhz = sat.carrier_frequency_hz / 1e6
+                #     if 1590 < freq_mhz < 1615:
+                #         sat.sys = SYS_GLO
+                #         sat.signal_name = "1C" # was L1C
+                #         add_signal(SYS_GLO, sat.signal_name)
+                #     # Add G2 if needed:
+                #     elif 1230 < freq_mhz < 1260:
+                #         sat.sys = SYS_GLO
+                #         sat.signal_name = "2C"
+                #         add_signal(SYS_GLO, sat.signal_name)
+                # elif sat.constellation_type == 5:  # BDS
+                #     freq_mhz = round(sat.carrier_frequency_hz / 1e5) / 10.0
+                #     if abs(freq_mhz - 1561.1) < 1.0: # B1I (1561.098)
+                #         sat.sys = SYS_BDS
+                #         sat.signal_name = "2I" # MODIFIED: B2I -> 2I
+                #         add_signal(SYS_BDS, sat.signal_name)
+                #     elif abs(freq_mhz - 1575.4) < 1.0: # B1C
+                #         sat.sys = SYS_BDS
+                #         sat.signal_name = "1P" # MODIFIED: B1C -> 1P
+                #         add_signal(SYS_BDS, sat.signal_name)
+                #     elif abs(freq_mhz - 1176.4) < 1.0: # B2a
+                #         sat.sys = SYS_BDS
+                #         sat.signal_name = "5P" # MODIFIED: B2a -> 5P
+                #         add_signal(SYS_BDS, sat.signal_name)
+                #     elif abs(freq_mhz - 1207.1) < 1.0: # B2b
+                #         sat.sys = SYS_BDS
+                #         sat.signal_name = "7I"
+                #         add_signal(SYS_BDS, sat.signal_name)
+                #     elif abs(freq_mhz - 1268.5) < 1.0: # B3I
+                #         sat.sys = SYS_BDS
+                #         sat.signal_name = "6I"
+                #         add_signal(SYS_BDS, sat.signal_name)
+                # elif sat.constellation_type == 6:  # GAL
+                #     freq_mhz = round(sat.carrier_frequency_hz / 1e5) / 10.0
+                #     if abs(freq_mhz - 1575.4) < 1.0:
+                #         sat.sys = SYS_GAL
+                #         sat.signal_name = "1C" # E1C
+                #         add_signal(SYS_GAL, sat.signal_name)
+                #     elif abs(freq_mhz - 1176.4) < 1.0:
+                #         sat.sys = SYS_GAL
+                #         sat.signal_name = "5Q" # E5Q
+                #         add_signal(SYS_GAL, sat.signal_name)
+                #     elif abs(freq_mhz - 1207.1) < 1.0:
+                #         sat.sys = SYS_GAL
+                #         sat.signal_name = "7Q" # E7Q
+                #         add_signal(SYS_GAL, sat.signal_name)
+                # elif sat.constellation_type == 4:  # QZSS
+                #     freq_mhz = round(sat.carrier_frequency_hz / 1e5) / 10.0
+                #     if abs(freq_mhz - 1575.4) < 1.0:
+                #         sat.sys = SYS_QZS
+                #         sat.signal_name = "1C"
+                #         add_signal(SYS_QZS, sat.signal_name)
+                #     elif abs(freq_mhz - 1176.4) < 1.0:
+                #         sat.sys = SYS_QZS
+                #         sat.signal_name = "5Q"
+                #         add_signal(SYS_QZS, sat.signal_name)
+                # # --------------------------------------------------------
+
+                # ================== 修改开始 ==================
+                # 简化版调用：自动拼装频率波段和CodeType
+                detected_code = get_smart_signal_code(
+                    sat.constellation_type,
+                    sat.carrier_frequency_hz,
+                    sat.code_type
+                )
+
+                if detected_code:
+                    sat.sys = sat.constellation_type
+                    sat.signal_name = detected_code
+                    add_signal(sat.sys, sat.signal_name)
+                # ================== 修改结束 ==================
 
             # Compute full cycle time of measurement, in milliseconds
             allRxMillis_p = int((epochs[0].obs.time_nano - epochs[0].obs.full_bias_nano) * 1e-6)
