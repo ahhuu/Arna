@@ -801,11 +801,11 @@ def main():
                 # Check observation availability
                 available = False
 
-                # 1. MSEC AMBIGUOUS
+                # 1. MSEC AMBIGUOUS（会导致伪距误差达300km）
                 if (sat.state & STATE_MSEC_AMBIGUOUS) != 0:
                     available = False
                 else:
-                    # 2. TOW/TOD
+                    # 2. Time Decoded (TOW / TOD)
                     tow_decoded = False
                     if sat.sys == SYS_GLO:
                         tow_decoded = (sat.state & STATE_GLO_TOD_DECODED) != 0
@@ -815,14 +815,14 @@ def main():
                     if not tow_decoded:
                         available = False
                     else:
-                        # 3. CODE LOCK
-                        if sat.sys in [SYS_GPS, SYS_BDS, SYS_QZS]:
-                            available = (sat.state & STATE_CODE_LOCK) != 0
-                        elif sat.sys == SYS_GLO:
-                            available = (sat.state & STATE_GLO_STRING_SYNC) != 0
-                        elif sat.sys == SYS_GAL:
-                            available = ((sat.state & STATE_GAL_E1BC_CODE_LOCK) != 0) or \
-                                        ((sat.state & STATE_GAL_E1C_2ND_CODE_LOCK) != 0)
+                        # 3. Code Lock
+                        if sat.sys == SYS_GAL:
+                            code_lock = (sat.state & STATE_GAL_E1BC_CODE_LOCK) != 0 or \
+                                        (sat.state & STATE_GAL_E1C_2ND_CODE_LOCK) != 0
+                        else:
+                            code_lock = (sat.state & STATE_CODE_LOCK) != 0
+
+                        available = code_lock
 
                 if not available:
                     continue  # Reject bad observations with invalid state
