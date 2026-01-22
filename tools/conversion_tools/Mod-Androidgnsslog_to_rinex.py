@@ -827,7 +827,7 @@ def main():
                         available = False
                     else:
                         # 3. Code Lock
-                        if sat.sys == SYS_GAL:
+                        if sat.sys == SYS_GAL and sat.signal_name == "1C":
                             code_lock = (sat.state & STATE_GAL_E1BC_CODE_LOCK) != 0 or \
                                         (sat.state & STATE_GAL_E1C_2ND_CODE_LOCK) != 0
                         else:
