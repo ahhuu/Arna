@@ -223,7 +223,6 @@ class RnxSat:
         self.l = [0.0] * MAX_FRQ
         self.d = [0.0] * MAX_FRQ
         self.s = [0.0] * MAX_FRQ
-        # 对应每个频点的 LLI 值（0=无，1=半周，2=周跳，可按位或）
         self.l_lli = [0] * MAX_FRQ
 
 
@@ -302,12 +301,16 @@ def get_smart_signal_code(sys, carrier_freq_hz, android_code_type):
     if not band_id:
         return None
 
-    # 核心逻辑：直接使用code_type
+    # 核心逻辑
     final_attr = raw_code if raw_code else default_attr
 
     # 3. BDS B2a 修正
     if sys == SYS_BDS and band_id == "5" and final_attr == "Q":
-        final_attr = "P"  # 强制修正为 5P
+        final_attr = "P"
+
+    # 4. 1L过滤
+    if band_id == "1" and final_attr == "L":
+        return None  # 跳过此数据
 
     return f"{band_id}{final_attr}"
 
@@ -416,13 +419,22 @@ def print_rnx_epoch(fp, epoch):
     # Sort satellites
     epoch.sats.sort(key=lambda x: (x.sys, x.prn))
 
+    # 过滤所有观测值全为0的卫星
+    valid_sats = [sat for sat in epoch.sats if not all((
+        all(v == 0 or v is None for v in sat.p),
+        all(v == 0 or v is None for v in sat.l),
+        all(v == 0 or v is None for v in sat.d),
+        all(v == 0 or v is None for v in sat.s)
+    ))]
+    epoch.sv = len(valid_sats)
+
     # Write epoch header
     fp.write("> {:04d} {:02d} {:02d} {:02d} {:02d} {:10.7f}  0 {:2d}\n".format(
         int(epoch.time[0]), int(epoch.time[1]), int(epoch.time[2]),
         int(epoch.time[3]), int(epoch.time[4]), epoch.time[5], epoch.sv))
 
     # Write satellite observations
-    for sat in epoch.sats:
+    for sat in valid_sats:
         prn = sat.prn
         if sat.sys == SYS_QZS:
             prn = qzss_prn_mapping(prn)  # Apply QZSS PRN mapping
@@ -442,7 +454,6 @@ def print_rnx_epoch(fp, epoch):
             if sat.l[i]:
                 lli_char = str(sat.l_lli[i]) if hasattr(sat, 'l_lli') and sat.l_lli[i] != 0 else ' '
                 fp.write(f"{sat.l[i]:14.3f}{lli_char} ")
-               #  fp.write("{:16.3f}".format(sat.l[i]))
             else:
                 fp.write("                ")
 
@@ -1006,7 +1017,7 @@ def main():
         progress_window.destroy()
         root.destroy()  # 销毁主窗口，避免残留进程
 
-    progress_window.after(1000, lambda: close_window())
+    progress_window.after(1000, lambda *args: close_window())
 
 
 def find_signal(sys, sig):
