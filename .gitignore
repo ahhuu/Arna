@@ -1,0 +1,13 @@
+.venv/
+.vscode/
+.history/
+build_dist/
+data/
+!Android_GNSS_Analysis/src/data/
+!Android_GNSS_Analysis/src/data/**
+docs/
+logs/
+resources/
+results/
+*.pyc
+__pycache__/
