@@ -1,5 +1,5 @@
 from typing import Dict, Any, List, Optional
-from src.data.writer import RinexWriter
+from ..data.writer import RinexWriter
 
 
 class CoreAlgorithmProcessor:
@@ -54,18 +54,27 @@ class CoreAlgorithmProcessor:
                 phone_data = phone_freqs[freq]
                 receiver_times = receiver_data['times']
                 phone_times = phone_data['times']
-                common_times: List = []
+                
+                # O(N) Matching using common time buckets (0.1s tolerance)
+                # Round to nearest 0.1s to create buckets
+                common_times = []
                 receiver_time_idx = {}
                 phone_time_idx = {}
-                for i, rec_time in enumerate(receiver_times):
-                    for j, phone_time in enumerate(phone_times):
-                        if abs((rec_time - phone_time).total_seconds()) < 0.1:
-                            if rec_time not in common_times:
-                                common_times.append(rec_time)
-                                receiver_time_idx[rec_time] = i
-                                phone_time_idx[rec_time] = j
-                            break
-                common_times = sorted(common_times)
+                
+                # Dict for phone times: {rounded_time: original_idx}
+                phone_lookup = {}
+                for j, pt in enumerate(phone_times):
+                    rounded = round(pt.timestamp() * 10) / 10.0
+                    phone_lookup[rounded] = j
+                
+                for i, rt in enumerate(receiver_times):
+                    rounded = round(rt.timestamp() * 10) / 10.0
+                    if rounded in phone_lookup:
+                        common_times.append(rt)
+                        receiver_time_idx[rt] = i
+                        phone_time_idx[rt] = phone_lookup[rounded]
+                
+                common_times.sort()
                 if not common_times:
                     continue
                 # phone cmc linear trend detection
@@ -956,4 +965,3 @@ class CoreAlgorithmProcessor:
                 fw.write(line)
 
         return {'corrected_rinex_path': output_path, 'modified': 0, 'modified_satellites': []}
-
