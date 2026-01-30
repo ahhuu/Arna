@@ -346,7 +346,7 @@ def parse_manufacturer_model(file_path):
 
 def parse_xyz_from_raw(raw_lines):
     """从原始数据中提取第一个Fix行的经纬度和高度，并转换为XYZ坐标"""
-    pattern = re.compile(r'^Fix,\s*([A-Z]+),\s*([\d.\-]+),\s*([\d.\-]+),\s*([\d.\-]+)')
+    pattern = re.compile(r'^Fix,\s*([a-zA-Z]+),\s*([\d.\-]+),\s*([\d.\-]+),\s*([\d.\-]+)')
     for line in raw_lines:
         m = pattern.match(line.strip())
         if m:
@@ -913,25 +913,42 @@ def main():
                 # Time difference between reception and transmission
                 pr_second = (receive_second - send_second) * 1e-9 - epochs[epo_bias].obs.bias_nano * 1e-9
 
-                # Check for week rollover
-                if pr_second > 604800 / 2:
-                    delS = round(pr_second / 604800) * 604800
-                    pr_second -= delS
-                    maxBiasSec = 10
-                    if pr_second > maxBiasSec:
-                        logger.error("周数翻转修正失败")
-                    else:
-                        logger.debug("检测到周数翻转并已修正")
+                # -----------------------------------------------------------
+                # [修正] 统一处理时间翻转 (Rollover / Crossover)
+                # -----------------------------------------------------------
 
-                if sat.sys in [SYS_GPS, SYS_GAL, SYS_BDS] and pr_second > 604800:
-                    pr_second %= 604800
-                if sat.sys == SYS_GLO and pr_second > 86400:
-                    pr_second %= 86400
+                # 1. 定义翻转周期 (Cycle Duration)
+                # GPS/GAL/BDS/QZSS 使用周周期 (604800秒)
+                # GLONASS 使用日周期 (86400秒)
+                cycle_duration = 604800.0
+                if sat.sys == SYS_GLO:
+                    cycle_duration = 86400.0
 
-                if pr_second > 0.5 or pr_second < 0:
+                half_cycle = cycle_duration / 2.0
+
+                # 2. 执行对称修正
+                # 现pr_second 代表 (Rx - Tx)，理论上应为信号飞行时间 (~0.07秒)
+                # 如果该值过大（正向翻转）或过小（负向翻转），说明发生了跨周/跨天
+                if pr_second > half_cycle:
+                    pr_second -= cycle_duration
+                    logger.debug(f"检测到 {sat.sys} 正向翻转，已修正")
+                elif pr_second < -half_cycle:
+                    pr_second += cycle_duration
+                    logger.debug(f"检测到 {sat.sys} 负向翻转，已修正")
+
+                # -----------------------------------------------------------
+                # [校验] 伪距有效性检查 (Sanity Check)
+                # -----------------------------------------------------------
+
+                # 3. 检查信号飞行时间是否在合理范围内
+                if pr_second < 0.0 or pr_second > 0.5:
+                    # 记录错误日志方便调试
+                    logger.warning(f"Svid {sat.svid} 伪距异常: {pr_second:.4f}s (已丢弃)")
                     continue
+
+                # 4. GLONASS 特殊过滤 (保留你原有的逻辑)
                 if sat.sys == SYS_GLO and sat.svid > 80:
-                    continue  # Delete odd GLONASS numbers > 80
+                    continue
 
                 # Store observations
                 existing_sat.p[frq] = pr_second * CLIGHT  # Pseudorange
