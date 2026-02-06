@@ -8,6 +8,13 @@ import matplotlib.pyplot as plt
 from matplotlib.figure import Figure
 import matplotlib.dates as mdates
 
+# 尝试导入mplcursors用于交互式数据点显示
+try:
+    import mplcursors
+    MPLCURSORS_AVAILABLE = True
+except ImportError:
+    MPLCURSORS_AVAILABLE = False
+
 # 设置中文字体支持
 try:
     plt.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei', 'DejaVu Sans', 'Arial Unicode MS']
@@ -44,14 +51,15 @@ class GNSSPlotter:
             raise ValueError(f"No data for satellite {sat_id}")
 
         fig, ax = plt.subplots(figsize=(12, 6))
+        # 同一频率内伪距和相位使用区别明显的marker（实心 vs 空心，填充 vs 线框）
         style_dict = {
             'L1C': {'color': 'blue', 'linestyle': '-', 'marker': 's', 'phase_marker': 'o', 'label_code': 'L1C code', 'label_phase': 'L1C phase'},
-            'L1D': {'color': 'cyan', 'linestyle': '-', 'marker': '^', 'phase_marker': 'x', 'label_code': 'L1D code', 'label_phase': 'L1D phase'},
-            'L1P': {'color': 'red', 'linestyle': '-', 'marker': 'D', 'phase_marker': '*', 'label_code': 'L1P code', 'label_phase': 'L1P phase'},
-            'L2I': {'color': 'blue', 'linestyle': '-', 'marker': 'o', 'phase_marker': '^', 'label_code': 'L2I code', 'label_phase': 'L2I phase'},
-            'L5Q': {'color': 'cyan', 'linestyle': '-', 'marker': '^', 'phase_marker': 's', 'label_code': 'L5Q code', 'label_phase': 'L5Q phase'},
-            'L7Q': {'color': 'magenta', 'linestyle': '-', 'marker': '^', 'phase_marker': 'D', 'label_code': 'L7Q code', 'label_phase': 'L7Q phase'},
-            'L5P': {'color': 'magenta', 'linestyle': '-', 'marker': 'D', 'phase_marker': '^', 'label_code': 'L5P code', 'label_phase': 'L5P phase'},
+            'L1D': {'color': 'cyan', 'linestyle': '-', 'marker': 'D', 'phase_marker': '^', 'label_code': 'L1D code', 'label_phase': 'L1D phase'},
+            'L1P': {'color': 'red', 'linestyle': '-', 'marker': 's', 'phase_marker': 'o', 'label_code': 'L1P code', 'label_phase': 'L1P phase'},
+            'L2I': {'color': 'blue', 'linestyle': '-', 'marker': 'D', 'phase_marker': '^', 'label_code': 'L2I code', 'label_phase': 'L2I phase'},
+            'L5Q': {'color': 'green', 'linestyle': '-', 'marker': 's', 'phase_marker': 'o', 'label_code': 'L5Q code', 'label_phase': 'L5Q phase'},
+            'L7Q': {'color': 'magenta', 'linestyle': '-', 'marker': 'D', 'phase_marker': '^', 'label_code': 'L7Q code', 'label_phase': 'L7Q phase'},
+            'L5P': {'color': 'orange', 'linestyle': '-', 'marker': 's', 'phase_marker': 'o', 'label_code': 'L5P code', 'label_phase': 'L5P phase'},
         }
 
         plotted = False
@@ -92,7 +100,7 @@ class GNSSPlotter:
                 else:
                     adjusted_phase.append(None)
 
-            style = style_dict.get(freq, {'linestyle': '-', 'label_code': f'{freq} code', 'label_phase': f'{freq} phase'})
+            style = style_dict.get(freq, {'linestyle': '-', 'marker': 'o', 'phase_marker': 's', 'label_code': f'{freq} code', 'label_phase': f'{freq} phase'})
 
             # assign distinct colors: one for code series, one for phase series
             code_color = base_colors[series_idx % ncolors]
@@ -100,11 +108,20 @@ class GNSSPlotter:
             phase_color = base_colors[series_idx % ncolors]
             series_idx += 1
 
-            # plot without markers; use solid for code and dashed for phase
-            code_line, = ax.plot(epochs, code_vals, linestyle='-', color=code_color,
-                                 label=style.get('label_code', f'{freq} code'), linewidth=1.2)
-            phase_line, = ax.plot(epochs, adjusted_phase, linestyle='--', color=phase_color, alpha=0.9,
-                                 label=style.get('label_phase', f'{freq} phase'), linewidth=1.0)
+            # plot with different markers for each frequency to distinguish them clearly
+            # 使用markevery间隔显示标记，markersize增大，同频率内code和phase使用区别明显的marker
+            code_marker = style.get('marker', 's')
+            phase_marker = style.get('phase_marker', 'o')
+            
+            # 计算标记间隔：数据点少于30个时每5个标记一次，否则每10个标记一次
+            marker_interval = 5 if len(epochs) < 30 else max(10, len(epochs) // 30)
+            
+            code_line, = ax.plot(epochs, code_vals, linestyle='-', marker=code_marker, markersize=8, 
+                                 markevery=marker_interval, markerfacecolor=code_color, markeredgecolor=code_color,
+                                 color=code_color, label=style.get('label_code', f'{freq} code'), linewidth=1.5)
+            phase_line, = ax.plot(epochs, adjusted_phase, linestyle='--', marker=phase_marker, markersize=8,
+                                  markevery=marker_interval, markerfacecolor='white', markeredgecolor=phase_color, markeredgewidth=1.5,
+                                  color=phase_color, alpha=0.9, label=style.get('label_phase', f'{freq} phase'), linewidth=1.2)
 
             # store for overlap detection (convert None -> np.nan)
             import numpy as _np
@@ -185,6 +202,13 @@ class GNSSPlotter:
         ax.grid(True, alpha=0.3)
         fig.tight_layout()
 
+        # 添加交互式数据点显示（点击数据点后用方向键切换）
+        if MPLCURSORS_AVAILABLE and not save:
+            cursor = mplcursors.cursor(ax)
+            cursor.connect("add", lambda sel: sel.annotation.set(
+                text=f'Epoch: {sel.target[0]:.0f}\nValue: {sel.target[1]:.3f} m\n\n点击后按←/→键\n(图表窗口需有焦点)',
+                bbox=dict(boxstyle='round,pad=0.5', fc='yellow', alpha=0.8)))
+
         if save:
             path = self._save_fig(fig, f"raw_observations_{sat_id}", output_dir)
             return {'figure': None, 'path': path}
@@ -203,7 +227,9 @@ class GNSSPlotter:
         valid_idx = [i for i in range(len(times))
                      if i < len(pr) and i < len(ph) and i < len(dop)
                      and pr[i] is not None and ph[i] is not None and dop[i] is not None]
-        epochs = list(range(1, len(valid_idx) + 1))
+        # derivatives的计算是从第1个历元开始（i=1），所以valid_idx[j]对应的是原始数据的第valid_idx[j]+1个历元
+        # 但derivatives本身的索引就是从1开始的（range(1, len(times))），所以直接使用valid_idx+1即可
+        epochs = [idx + 1 for idx in valid_idx]  # +1转换为1-based历元号
         valid_pr = [pr[i] for i in valid_idx]
         valid_ph = [ph[i] for i in valid_idx]
         valid_dop = [dop[i] for i in valid_idx]
@@ -235,6 +261,14 @@ class GNSSPlotter:
         ax2.grid(True)
 
         fig.tight_layout()
+
+        # 添加交互式数据点显示（点击数据点后用方向键切换）
+        if MPLCURSORS_AVAILABLE and not save:
+            cursor = mplcursors.cursor([ax1, ax2])
+            cursor.connect("add", lambda sel: sel.annotation.set(
+                text=f'Epoch: {sel.target[0]:.0f}\nValue: {sel.target[1]:.6f} m/s\n\n点击后按←/→键\n(图表窗口需有焦点)',
+                bbox=dict(boxstyle='round,pad=0.5', fc='yellow', alpha=0.8)))
+
         if save:
             path = self._save_fig(fig, f"derivatives_{sat_id}_{freq}", output_dir)
             return {'figure': None, 'path': path}
@@ -247,15 +281,42 @@ class GNSSPlotter:
             raise ValueError(f"No diff data for {sat_id} {freq}")
         d = sat[freq]
         changes_raw = d.get('diff_changes', []) or []
-        changes = [c for c in changes_raw if c is not None]
-        epochs = list(range(1, len(changes) + 1))
+        epoch_indices_raw = d.get('epoch_indices', []) or []
+        
+        # 过滤掉 None 值，并保持索引对应关系
+        changes = []
+        epoch_indices = []
+        for i, c in enumerate(changes_raw):
+            if c is not None:
+                changes.append(c)
+                # 使用真实的历元索引（1-based，与RINEX文件一致）
+                if i < len(epoch_indices_raw):
+                    epoch_indices.append(epoch_indices_raw[i] + 1)  # +1 转换为1-based
+                else:
+                    epoch_indices.append(i + 1)  # fallback到相对索引
+        
+        # 如果没有epoch_indices数据（旧数据格式），使用相对编号
+        if not epoch_indices:
+            epoch_indices = list(range(1, len(changes) + 1))
+        
+        epochs = epoch_indices
 
         fig, ax = plt.subplots(figsize=(10, 4))
-        ax.plot(epochs, changes, marker='o')
+        line, = ax.plot(epochs, changes, marker='o', markersize=4, linestyle='-', linewidth=1)
         ax.set_title(f"Code-Phase Diff Changes {sat_id} {freq}")
         ax.set_xlabel('Epoch')
         ax.set_ylabel('Change (m)')
         ax.grid(True)
+
+        # 添加交互式数据点显示（只在数据点上点击，然后用方向键切换）
+        if MPLCURSORS_AVAILABLE and not save:
+            # 创建一个不可见的scatter来确保只响应数据点，但有足够的点击区域
+            scatter = ax.scatter(epochs, changes, s=50, alpha=0, picker=True)
+            cursor = mplcursors.cursor(scatter)
+            cursor.connect("add", lambda sel: sel.annotation.set(
+                text=f'Epoch: {sel.target[0]:.0f}\nChange: {sel.target[1]:.3f} m\n\n点击后按←/→键\n(图表窗口需有焦点)',
+                bbox=dict(boxstyle='round,pad=0.5', fc='yellow', alpha=0.8)))
+
         if save:
             path = self._save_fig(fig, f"diff_variation_{sat_id}_{freq}", output_dir)
             return {'figure': None, 'path': path}
@@ -268,15 +329,39 @@ class GNSSPlotter:
             raise ValueError(f"No diff data for {sat_id} {freq}")
         d = sat[freq]
         values_raw = d.get('code_phase_diff', []) or []
-        values = [v for v in values_raw if v is not None]
-        epochs = list(range(1, len(values) + 1))
+        epoch_indices_raw = d.get('epoch_indices', []) or []
+        
+        # 过滤掉None值，并保持索引对应关系
+        values = []
+        epoch_indices = []
+        for i, v in enumerate(values_raw):
+            if v is not None:
+                values.append(v)
+                if i < len(epoch_indices_raw):
+                    epoch_indices.append(epoch_indices_raw[i] + 1)  # +1转换为1-based
+                else:
+                    epoch_indices.append(i + 1)  # fallback
+        
+        if not epoch_indices:
+            epoch_indices = list(range(1, len(values) + 1))
+        
+        epochs = epoch_indices
 
         fig, ax = plt.subplots(figsize=(10, 4))
-        ax.plot(epochs, values, marker='.')
+        line, = ax.plot(epochs, values, marker='o', markersize=3, linestyle='-', linewidth=1)
         ax.set_title(f"Code-Phase Raw Diff {sat_id} {freq}")
         ax.set_xlabel('Epoch')
         ax.set_ylabel('Code-Phase (m)')
         ax.grid(True)
+
+        # 添加交互式数据点显示（只在数据点上点击，然后用方向键切换）
+        if MPLCURSORS_AVAILABLE and not save:
+            scatter = ax.scatter(epochs, values, s=50, alpha=0, picker=True)
+            cursor = mplcursors.cursor(scatter)
+            cursor.connect("add", lambda sel: sel.annotation.set(
+                text=f'Epoch: {sel.target[0]:.0f}\nCode-Phase: {sel.target[1]:.3f} m\n\n点击后按←/→键\n(图表窗口需有焦点)',
+                bbox=dict(boxstyle='round,pad=0.5', fc='yellow', alpha=0.8)))
+
         if save:
             path = self._save_fig(fig, f"raw_diff_{sat_id}_{freq}", output_dir)
             return {'figure': None, 'path': path}
@@ -288,16 +373,40 @@ class GNSSPlotter:
             raise ValueError(f"No prediction error data for {sat_id} {freq}")
         d = sat[freq]
         errs_raw = d.get('prediction_error', []) or []
-        errs = [e for e in errs_raw if e is not None]
-        epochs = list(range(1, len(errs) + 1))
+        epoch_indices_raw = d.get('epoch_indices', []) or []
+        
+        # 过滤掉None值，并保持索引对应关系
+        errs = []
+        epoch_indices = []
+        for i, e in enumerate(errs_raw):
+            if e is not None:
+                errs.append(e)
+                if i < len(epoch_indices_raw):
+                    epoch_indices.append(epoch_indices_raw[i] + 1)  # +1转换为1-based
+                else:
+                    epoch_indices.append(i + 1)  # fallback
+        
+        if not epoch_indices:
+            epoch_indices = list(range(1, len(errs) + 1))
+        
+        epochs = epoch_indices
 
         fig, ax = plt.subplots(figsize=(10, 4))
-        ax.plot(epochs, errs, marker='o')
+        line, = ax.plot(epochs, errs, linestyle='-', linewidth=1)
         ax.axhline(y=0, color='k', linestyle='--', alpha=0.3)
         ax.set_title(f"Prediction Errors {sat_id} {freq}")
         ax.set_xlabel('Epoch')
         ax.set_ylabel('Error (m)')
         ax.grid(True)
+
+        # 添加交互式数据点显示（只在数据点上点击，然后用方向键切换）
+        if MPLCURSORS_AVAILABLE and not save:
+            scatter = ax.scatter(epochs, errs, s=50, alpha=0, picker=True)
+            cursor = mplcursors.cursor(scatter)
+            cursor.connect("add", lambda sel: sel.annotation.set(
+                text=f'Epoch: {sel.target[0]:.0f}\nError: {sel.target[1]:.6f} m\n\n点击后按←/→键\n(图表窗口需有焦点)',
+                bbox=dict(boxstyle='round,pad=0.5', fc='yellow', alpha=0.8)))
+
         if save:
             path = self._save_fig(fig, f"prediction_errors_{sat_id}_{freq}", output_dir)
             return {'figure': None, 'path': path}
@@ -312,7 +421,13 @@ class GNSSPlotter:
         code = d.get('dd_code', []) or []
         phase = d.get('dd_phase', []) or []
         dop = d.get('dd_doppler', []) or []
-        epochs = list(range(1, len(code) + 1))
+        epoch_indices_raw = d.get('epoch_indices', []) or []
+        
+        # 使用真实历元索引（epoch_indices记录的是双差对应的历元）
+        if epoch_indices_raw:
+            epochs = [idx + 1 for idx in epoch_indices_raw]  # +1转换为1-based
+        else:
+            epochs = list(range(1, len(code) + 1))  # fallback到相对编号
 
         fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(10, 9), sharex=True)
         if epochs:
@@ -331,6 +446,21 @@ class GNSSPlotter:
                 a.legend(loc='upper right')
 
         fig.tight_layout()
+
+        # 添加交互式数据点显示（点击数据点后用方向键切换）
+        if MPLCURSORS_AVAILABLE and not save:
+            cursor = mplcursors.cursor([ax1, ax2, ax3])
+            def on_add(sel):
+                x, y = sel.target
+                # 根据子图类型显示不同的单位
+                if sel.artist.axes == ax3:
+                    unit = 'm/s'
+                else:
+                    unit = 'm'
+                sel.annotation.set(text=f'Epoch: {x:.0f}\nValue: {y:.6f} {unit}\n\n点击后按←/→键\n(图表窗口需有焦点)',
+                                  bbox=dict(boxstyle='round,pad=0.5', fc='yellow', alpha=0.8))
+            cursor.connect("add", on_add)
+
         if save:
             path = self._save_fig(fig, f"dd_{sat_id}_{freq}", output_dir)
             return {'figure': None, 'path': path}
@@ -362,6 +492,14 @@ class GNSSPlotter:
             ax.legend()
             ax.grid(True)
         fig.autofmt_xdate()
+
+        # 添加交互式数据点显示（点击数据点后用方向键切换）
+        if MPLCURSORS_AVAILABLE and not save:
+            cursor = mplcursors.cursor(axes)
+            cursor.connect("add", lambda sel: sel.annotation.set(
+                text=f'Value: {sel.target[1]:.3f} m\n\n点击后按←/→键\n(图表窗口需有焦点)',
+                bbox=dict(boxstyle='round,pad=0.5', fc='yellow', alpha=0.8)))
+
         if save:
             path = self._save_fig(fig, 'receiver_cmc', output_dir)
             return {'figure': None, 'path': path}
@@ -406,8 +544,9 @@ class GNSSPlotter:
             delta_mw = mw_data['delta_mw']
             threshold = mw_data.get('threshold_history', [])
             
-            # 绘制MW差异
-            ax1.plot(epochs, delta_mw, 'b-', linewidth=1.5, label='|Nw(i) - mean(Nw)|')
+            # 绘制MW差异（带标记点）
+            ax1.plot(epochs, delta_mw, 'b-', marker='o', markersize=3,
+                    linewidth=1.5, label='|Nw(i) - mean(Nw)|')
             
             # 绘制阈值线
             mw_mode = mw_data.get('threshold_mode', 'dynamic')
@@ -469,8 +608,9 @@ class GNSSPlotter:
             delta_gf = gf_data['delta_gf']
             threshold = gf_data.get('threshold', 0.4)
             
-            # 绘制GF差异
-            ax2.plot(epochs, delta_gf, 'b-', linewidth=1.5, label='|GF(i) - GF(i-1)|')
+            # 绘制GF差异（带标记点）
+            ax2.plot(epochs, delta_gf, 'b-', marker='o', markersize=3,
+                    linewidth=1.5, label='|GF(i) - GF(i-1)|')
             
             # 绘制阈值线
             ax2.axhline(y=threshold, color='r', linestyle='--', linewidth=1.2, 
@@ -495,9 +635,158 @@ class GNSSPlotter:
             ax2.set_title('(b) GF检验', fontsize=12, loc='left')
         
         plt.tight_layout()
+
+        # 添加交互式数据点显示（点击数据点后用方向键切换）
+        if MPLCURSORS_AVAILABLE and not save:
+            cursor = mplcursors.cursor([ax1, ax2])
+            def on_add(sel):
+                x, y = sel.target
+                if sel.artist.axes == ax1:
+                    label_text = 'ΔMW'
+                else:
+                    label_text = 'ΔGF'
+                sel.annotation.set(text=f'历元: {x:.0f}\n{label_text}: {y:.3f} m\n\n点击后按←/→键\n(图表窗口需有焦点)',
+                                  bbox=dict(boxstyle='round,pad=0.5', fc='yellow', alpha=0.8))
+            cursor.connect("add", on_add)
         
         if save:
             path = self._save_fig(fig, f'cycle_slip_{sat_id}', output_dir)
+            return {'figure': None, 'path': path}
+        return {'figure': fig, 'path': None}
+
+    def plot_inter_freq_bias(self, analysis_result: Dict[str, Any], 
+                            save: bool = True, 
+                            output_dir: Optional[str] = None) -> Dict[str, Any]:
+        """
+        绘制伪距频间偏差分析图：上下两个子图
+        - 上图：原始频间差值（Raw Inter-Frequency Difference）
+        - 下图：ISD处理后的频间差值（After Inter-Satellite Single Difference）
+        
+        参数:
+            analysis_result: InterFrequencyBiasAnalyzer.analyze_inter_freq_bias 的返回结果
+            save: 是否保存图片
+            output_dir: 输出目录
+        """
+        import numpy as np
+        
+        raw_diffs = analysis_result.get('raw_diffs', {})
+        isd_diffs = analysis_result.get('isd_diffs', {})
+        freq_pair = analysis_result.get('freq_pair', ('', ''))
+        constellation = analysis_result.get('constellation', 'All')
+        
+        if not raw_diffs:
+            raise ValueError("未找到频间差数据")
+        
+        # 创建图形：两个子图，共享X轴
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 10), sharex=True)
+        
+        # 颜色映射（为每颗卫星分配不同颜色）
+        satellites = sorted(raw_diffs.keys())
+        colors = plt.cm.tab20(np.linspace(0, 1, len(satellites)))
+        color_map = dict(zip(satellites, colors))
+        
+        # ========== 上图：原始频间差 ==========
+        for sat_id, sat_data in raw_diffs.items():
+            times = sat_data['times']
+            diffs = sat_data['diff']
+            
+            # 转换为相对秒数（从第一个历元开始）
+            if times:
+                start_time = times[0]
+                relative_seconds = [(t - start_time).total_seconds() for t in times]
+                
+                # 绘制散点
+                ax1.scatter(relative_seconds, diffs, 
+                           c=[color_map[sat_id]], 
+                           s=15, alpha=0.6, label=sat_id)
+        
+        ax1.set_ylabel('频间差 (m)', fontsize=12)
+        ax1.set_title(f'(a) 原始伪距频间差 {freq_pair[0]}-{freq_pair[1]} (星座: {constellation or "All"})', 
+                     fontsize=13, fontweight='bold')
+        ax1.grid(True, alpha=0.3)
+        ax1.axhline(y=0, color='black', linestyle='--', linewidth=0.8, alpha=0.5)
+        
+        # 图例（放在右侧，避免遮挡数据）
+        ax1.legend(loc='center left', bbox_to_anchor=(1.01, 0.5), 
+                  fontsize=8, ncol=1, framealpha=0.9)
+        
+        # ========== 下图：ISD处理后的频间差 ==========
+        for sat_id, sat_data in isd_diffs.items():
+            times = sat_data['times']
+            isd_diff_values = sat_data['isd_diff']
+            
+            # 过滤有效值
+            valid_data = [(t, d) for t, d in zip(times, isd_diff_values) if d is not None]
+            if not valid_data:
+                continue
+            
+            valid_times, valid_diffs = zip(*valid_data)
+            
+            # 转换为相对秒数
+            if valid_times:
+                start_time = valid_times[0]
+                relative_seconds = [(t - start_time).total_seconds() for t in valid_times]
+                
+                # 绘制散点
+                ax2.scatter(relative_seconds, valid_diffs,
+                           c=[color_map[sat_id]],
+                           s=15, alpha=0.6, label=sat_id)
+        
+        ax2.set_xlabel('相对时间 (秒)', fontsize=12)
+        ax2.set_ylabel('频间差 (m)', fontsize=12)
+        ax2.set_title(f'(b) 星间单差(ISD)后频间差 {freq_pair[0]}-{freq_pair[1]}', 
+                     fontsize=13, fontweight='bold')
+        ax2.grid(True, alpha=0.3)
+        ax2.axhline(y=0, color='black', linestyle='--', linewidth=0.8, alpha=0.5)
+        
+        # 添加 ±10m 参考线（期望值范围）
+        ax2.axhline(y=10, color='red', linestyle=':', linewidth=0.8, alpha=0.5, label='±10m')
+        ax2.axhline(y=-10, color='red', linestyle=':', linewidth=0.8, alpha=0.5)
+        
+        ax2.legend(loc='center left', bbox_to_anchor=(1.01, 0.5),
+                  fontsize=8, ncol=1, framealpha=0.9)
+        
+        # 添加统计信息文本框
+        try:
+            from src.processing.inter_freq_bias import InterFrequencyBiasAnalyzer
+            analyzer = InterFrequencyBiasAnalyzer()
+            stats = analyzer.get_statistics(analysis_result)
+            
+            raw_stats = stats.get('raw_stats')
+            isd_stats = stats.get('isd_stats')
+            improvement = stats.get('improvement')
+            
+            stats_text = ""
+            if raw_stats:
+                stats_text += f"原始差值 RMS: {raw_stats['rms']:.3f} m\n"
+                stats_text += f"原始差值 STD: {raw_stats['std']:.3f} m\n"
+            if isd_stats:
+                stats_text += f"ISD后 RMS: {isd_stats['rms']:.3f} m\n"
+                stats_text += f"ISD后 STD: {isd_stats['std']:.3f} m\n"
+            if improvement is not None:
+                stats_text += f"改善率: {improvement:.1f}%"
+            
+            if stats_text:
+                ax2.text(0.02, 0.98, stats_text,
+                        transform=ax2.transAxes,
+                        fontsize=9,
+                        verticalalignment='top',
+                        bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
+        except Exception:
+            pass  # 如果统计计算失败，不影响绘图
+        
+        plt.tight_layout()
+
+        # 添加交互式数据点显示（点击数据点后用方向键切换）
+        if MPLCURSORS_AVAILABLE and not save:
+            cursor = mplcursors.cursor([ax1, ax2])
+            cursor.connect("add", lambda sel: sel.annotation.set(
+                text=f'时间: {sel.target[0]:.0f}s\n频间差: {sel.target[1]:.3f} m\n\n点击后按←/→键\n(图表窗口需有焦点)',
+                bbox=dict(boxstyle='round,pad=0.5', fc='yellow', alpha=0.8)))
+        
+        if save:
+            suffix = f"_{constellation}" if constellation else ""
+            path = self._save_fig(fig, f'inter_freq_bias_{freq_pair[0]}_{freq_pair[1]}{suffix}', output_dir)
             return {'figure': None, 'path': path}
         return {'figure': fig, 'path': None}
 

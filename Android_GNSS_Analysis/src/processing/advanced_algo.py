@@ -1,5 +1,12 @@
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
+import os
+import datetime
+import pandas as pd
+import numpy as np
 from ..data.writer import RinexWriter
+from .cycle_slip_detector import CycleSlipDetector
+from .inter_freq_bias import InterFrequencyBiasAnalyzer
+
 
 
 class CoreAlgorithmProcessor:
@@ -7,7 +14,12 @@ class CoreAlgorithmProcessor:
 
     This module contains pure functions ported from the legacy analyzer implementation.
     Each method returns results and does not mutate external state.
+    Methods are programmatically callable for testing; the window UI is optional.
     """
+
+    def __init__(self):
+        self.cs_detector = CycleSlipDetector()
+        self.ifb_analyzer = InterFrequencyBiasAnalyzer()
 
     def calculate_dcmc(self, receiver_cmc: Dict[str, Any], phone_cmc: Dict[str, Any],
                        r_squared_threshold: float = 0.5,
@@ -518,29 +530,67 @@ class CoreAlgorithmProcessor:
     def _identify_continuous_arcs(self, times, values, max_gap_seconds=300, sat_freq_info=""):
         if not times or not values:
             return []
+        
+        # 如果提供了卫星频率信息，尝试检测周跳
+        cycle_slip_epochs = set()
+        if sat_freq_info and hasattr(self, 'cs_detector'):
+            # 这里我们期望sat_freq_info格式为 "SATID_FREQ"
+            # 但我们需要完整的观测数据来进行探测，而这里只有times和values
+            # 因此，我们只能基于简单的gap检测，或者在调用此函数前已经进行了周跳探测并传入了flags
+            # 为保持签名兼容，我们这里暂时只做Gap检测
+            # 真正的周跳探测应该在流程早期对全量数据进行
+            pass
+
         arcs = []
         current_arc_times = []
         current_arc_values = []
+        
+        # 辅助：获取周跳标记（如果values中包含元组或对象，这里假设values是纯数值）
+        # 如果需要集成周跳，我们在处理values前应该已经处理过
+        
         for i, (time, value) in enumerate(zip(times, values)):
             if value is None:
                 continue
+                
+            is_new_arc = False
+            has_slip = False
+            
             if not current_arc_times:
-                current_arc_times.append(time)
-                current_arc_values.append(value)
+                is_new_arc = True
             else:
                 time_diff = (time - current_arc_times[-1]).total_seconds()
                 if time_diff > max_gap_seconds:
-                    if sat_freq_info:
-                        pass
+                    is_new_arc = True
+                # 这里可以添加额外的逻辑：如果外部传入了周跳信息
+            
+            if is_new_arc:
+                if current_arc_times:
                     arcs.append({'times': current_arc_times, 'values': current_arc_values, 'has_cycle_slip': False})
-                    current_arc_times = [time]
-                    current_arc_values = [value]
-                else:
-                    current_arc_times.append(time)
-                    current_arc_values.append(value)
+                current_arc_times = [time]
+                current_arc_values = [value]
+            else:
+                current_arc_times.append(time)
+                current_arc_values.append(value)
+                
         if current_arc_times:
             arcs.append({'times': current_arc_times, 'values': current_arc_values, 'has_cycle_slip': False})
         return arcs
+
+    def detect_cycle_slips_for_all(self, observations: Dict[str, Any], 
+                                  frequencies: Dict[str, Dict], 
+                                  wavelengths: Dict[str, Dict]) -> Dict[str, Any]:
+        """Run cycle slip detection for all satellites."""
+        if not hasattr(self, 'cs_detector'):
+            self.cs_detector = CycleSlipDetector()
+        return self.cs_detector.detect_cycle_slips(observations, frequencies, wavelengths)
+
+    def run_inter_freq_bias_analysis(self, observations: Dict[str, Any], 
+                                    freq1: str, freq2: str, 
+                                    constellation: Optional[str] = None) -> Dict[str, Any]:
+        """Run Inter-Frequency Bias analysis."""
+        if not hasattr(self, 'ifb_analyzer'):
+            self.ifb_analyzer = InterFrequencyBiasAnalyzer()
+        return self.ifb_analyzer.analyze_inter_freq_bias(observations, freq1, freq2, constellation)
 
     def _check_linear_trend(self, times, values, min_r_squared=0.5, min_slope_magnitude=1e-6):
         if len(times) < 3:
@@ -573,128 +623,6 @@ class CoreAlgorithmProcessor:
         intercept = (sum_y - slope * sum_x) / n
         return slope, intercept
 
-    # --- Doppler prediction (ported) ---
-    def run_doppler_phase_prediction(self, observations_meters: Dict[str, Any],
-                                     frequencies: Dict[str, Dict],
-                                     wavelengths: Dict[str, Dict],
-                                     original_rinex_path: Optional[str] = None,
-                                     output_path: Optional[str] = None,
-                                     writer: Optional[RinexWriter] = None) -> Dict[str, Any]:
-        """Predict missing carrier phases from Doppler and optionally write a doppler-predicted RINEX.
-
-        If writer and original_rinex_path are provided, this method will call
-        writer.write_doppler_predicted_rinex to create a new RINEX file.
-        Returns dict with keys: 'prediction_results' and (optionally) 'writer_result'.
-        """
-        prediction_results = {
-            'predicted_phases': {},
-            'missing_epochs': {},
-            'correction_log': [],
-            'total_missing': 0,
-            'total_predicted': 0
-        }
-
-        for sat_id, freq_data in observations_meters.items():
-            sat_prediction = {}
-            sat_missing_epochs = {}
-            for freq, obs_data in freq_data.items():
-                times = obs_data.get('times', [])
-                phase_values = obs_data.get('phase_cycle', [])
-                doppler_values = obs_data.get('doppler', [])
-
-                # get frequency and wavelength
-                system = sat_id[0] if sat_id else ''
-                frequency = frequencies.get(system, {}).get(freq)
-                wavelength = wavelengths.get(system, {}).get(freq)
-
-                if frequency is None or wavelength is None:
-                    continue
-
-                freq_prediction = {
-                    'times': [],
-                    'original_phases': [],
-                    'predicted_phases': [],
-                    'is_predicted': [],
-                    'missing_epochs': [],
-                    'prediction_details': []
-                }
-
-                missing_epochs = []
-
-                for i in range(len(times)):
-                    if phase_values[i] is None:
-                        missing_epochs.append(i)
-                        predicted_phase = self._predict_phase_at_epoch(
-                            i, times, phase_values, doppler_values, frequency, wavelength
-                        )
-                        if predicted_phase is not None:
-                            freq_prediction['times'].append(times[i])
-                            freq_prediction['original_phases'].append(None)
-                            freq_prediction['predicted_phases'].append(predicted_phase)
-                            freq_prediction['is_predicted'].append(True)
-                            # fill-in for recursion
-                            phase_values[i] = predicted_phase
-                            detail = {
-                                'sat_id': sat_id,
-                                'freq': freq,
-                                'epoch_idx': i,
-                                'time': times[i],
-                                'predicted_phase_cycle': predicted_phase,
-                                'predicted_phase_m': predicted_phase * wavelength
-                            }
-                            freq_prediction['prediction_details'].append(detail)
-                            prediction_results['correction_log'].append(detail)
-                            prediction_results['total_predicted'] += 1
-                    else:
-                        freq_prediction['times'].append(times[i])
-                        freq_prediction['original_phases'].append(phase_values[i])
-                        freq_prediction['predicted_phases'].append(phase_values[i])
-                        freq_prediction['is_predicted'].append(False)
-
-                freq_prediction['missing_epochs'] = missing_epochs
-                if freq_prediction['times'] or freq_prediction['prediction_details']:
-                    sat_prediction[freq] = freq_prediction
-                    sat_missing_epochs[freq] = missing_epochs
-                prediction_results['total_missing'] += len(missing_epochs)
-
-            if sat_prediction:
-                prediction_results['predicted_phases'][sat_id] = sat_prediction
-                prediction_results['missing_epochs'][sat_id] = sat_missing_epochs
-
-        # return prediction_results as before for backward compatibility
-        out = prediction_results
-
-        # optionally write doppler predicted rinex using writer
-        if writer and original_rinex_path:
-            try:
-                writer_result = writer.write_doppler_predicted_rinex(original_rinex_path, output_path, prediction_results)
-                out['writer_result'] = writer_result
-            except Exception:
-                out['writer_result'] = {'error': 'writer_failed'}
-
-        return out
-
-    def _predict_phase_at_epoch(self, target_idx, times, phase_values, doppler_values,
-                                frequency, wavelength):
-        """Helper: predict phase at target index using neighbor doppler values."""
-        if target_idx <= 0:
-            return None
-        prev_phase = phase_values[target_idx - 1]
-        if prev_phase is None:
-            return None
-        prev_doppler = doppler_values[target_idx - 1] if target_idx - 1 < len(doppler_values) else None
-        curr_doppler = doppler_values[target_idx] if target_idx < len(doppler_values) else None
-        if prev_doppler is None or curr_doppler is None:
-            return None
-        time_diff = (times[target_idx] - times[target_idx - 1]).total_seconds()
-        if time_diff <= 0:
-            return None
-        prev_doppler_hz = prev_doppler / wavelength
-        curr_doppler_hz = curr_doppler / wavelength
-        doppler_mean_hz = (prev_doppler_hz + curr_doppler_hz) / 2
-        phase_change = -time_diff * doppler_mean_hz / frequency
-        predicted_phase = prev_phase + phase_change
-        return predicted_phase
 
     # --- ISB core methods (simplified, ported behavior) ---
     def run_prepare_isb_data(self, observations_meters: Dict[str, Any], receiver_observations: Dict[str, Any],
@@ -965,3 +893,355 @@ class CoreAlgorithmProcessor:
                 fw.write(line)
 
         return {'corrected_rinex_path': output_path, 'modified': 0, 'modified_satellites': []}
+
+    def apply_doppler_smoothing(self, observations_meters: Dict[str, Any], 
+                                max_window: int = 20, 
+                                reset_threshold_m: float = 15.0,
+                                input_file_name: str = "N/A") -> Dict[str, Any]:
+        """Apply Hatch Filter with Doppler Integration for pseudorange smoothing.
+        
+        Algorithm: 
+            \\bar{P}_k = (1/n) * P_k + ((n-1)/n) * (\\bar{P}_{k-1} + \\Delta R_{doppler})
+        
+        Where:
+            - P_k: raw pseudorange observation
+            - n: dynamic window size (grows from 1 to max_window)
+            - \\bar{P}_{k-1}: smoothed pseudorange from previous epoch
+            - \\Delta R_{doppler}: range change from doppler integration (trapezoid rule)
+        
+        Input:
+            observations_meters: {sat_id: {freq: {'times': [...], 'code': [...], 'phase': [...], 'doppler': [...]}}}
+            max_window: maximum smoothing window size (number of epochs)
+            reset_threshold_m: coarse error threshold in meters for window reset
+            input_file_name: Name of the input file being processed (for logging)
+        
+        Output:
+            {
+                'smoothed_observations': {sat_id: {freq: {'times': [...], 'code': [...], 'code_smoothed': [...]}}},
+                'smoothing_meta': {sat_id: {freq: {'window_sizes': [...], 'resets': [...], 'reset_reasons': [...]}}},
+                'log': detailed processing log
+            }
+        """
+        import numpy as np
+        from datetime import datetime
+        
+        smoothed_obs = {}
+        smoothing_meta = {}
+        
+        for sat_id in observations_meters.keys():
+            sat_obs = observations_meters[sat_id]
+            if sat_id not in smoothed_obs:
+                smoothed_obs[sat_id] = {}
+                smoothing_meta[sat_id] = {}
+            
+            for freq in sat_obs.keys():
+                freq_data = sat_obs[freq]
+                
+                # Extract required fields
+                times = freq_data.get('times', [])
+                codes = freq_data.get('code', [])
+                doppler_velocities = freq_data.get('doppler', [])
+                
+                if not times or not codes:
+                    continue
+                
+                # Initialize smoothing state
+                codes_smoothed = []
+                window_sizes = []
+                resets = []  # list of epoch indices where reset occurred
+                reset_reasons = []  # list of reset reason strings
+                reset_count = 0
+                
+                n = 1  # current window size
+                prev_smoothed = None
+                prev_doppler = None
+                prev_time = None
+                
+                for epoch_idx in range(len(times)):
+                    code_val = codes[epoch_idx]
+                    doppler_vel = doppler_velocities[epoch_idx] if epoch_idx < len(doppler_velocities) else None
+                    curr_time = times[epoch_idx]
+                    
+                    # Handle missing code observations
+                    if code_val is None:
+                        codes_smoothed.append(None)
+                        window_sizes.append(0)
+                        # Reset on data gap
+                        if prev_smoothed is not None:
+                            n = 1
+                            prev_smoothed = None
+                            resets.append(epoch_idx)
+                            reset_reasons.append("data_gap")
+                            reset_count += 1
+                        continue
+                    
+                    # First epoch initialization
+                    if prev_smoothed is None:
+                        codes_smoothed.append(code_val)
+                        window_sizes.append(1)
+                        prev_smoothed = code_val
+                        prev_doppler = doppler_vel
+                        prev_time = curr_time
+                        n = 1
+                        continue
+                    
+                    # Compute time delta
+                    if prev_time is not None:
+                        try:
+                            dt = (curr_time - prev_time).total_seconds()
+                        except:
+                            dt = 0.0
+                    else:
+                        dt = 0.0
+                    
+                    # Check for time discontinuity (> 3 seconds)
+                    if dt > 3.0 or dt < 0:
+                        n = 1
+                        codes_smoothed.append(code_val)
+                        window_sizes.append(1)
+                        prev_smoothed = code_val
+                        prev_doppler = doppler_vel
+                        prev_time = curr_time
+                        resets.append(epoch_idx)
+                        reset_reasons.append(f"time_discontinuity(dt={dt:.2f}s)")
+                        reset_count += 1
+                        continue
+                    
+                    # Compute Doppler-based range change (trapezoid integration)
+                    delta_r_doppler = 0.0
+                    if prev_doppler is not None and doppler_vel is not None and dt > 0:
+                        # Trapezoid rule: (v_prev + v_curr) / 2 * dt
+                        doppler_vel_avg = (prev_doppler + doppler_vel) / 2.0
+                        delta_r_doppler = doppler_vel_avg * dt
+                    
+                    # Apply Hatch filter formula
+                    # \\bar{P}_k = (1/n) * P_k + ((n-1)/n) * (\\bar{P}_{k-1} + \\Delta R_{doppler})
+                    smoothed_val = (1.0 / n) * code_val + ((n - 1.0) / n) * (prev_smoothed + delta_r_doppler)
+                    
+                    # Coarse error detection: check if smoothed value deviates too much from raw
+                    error = abs(smoothed_val - code_val)
+                    if error > reset_threshold_m:
+                        # Reset and use raw value
+                        n = 1
+                        codes_smoothed.append(code_val)
+                        window_sizes.append(1)
+                        prev_smoothed = code_val
+                        resets.append(epoch_idx)
+                        reset_reasons.append(f"coarse_error({error:.2f}m)")
+                        reset_count += 1
+                    else:
+                        # Accept smoothed value
+                        codes_smoothed.append(smoothed_val)
+                        prev_smoothed = smoothed_val
+                        window_sizes.append(n)
+                        
+                        # Increment window size up to max
+                        if n < max_window:
+                            n += 1
+                    
+                    # Update for next iteration
+                    prev_doppler = doppler_vel
+                    prev_time = curr_time
+                
+                # Store results
+                smoothed_obs[sat_id][freq] = {
+                    'times': times,
+                    'code': codes,
+                    'code_smoothed': codes_smoothed,
+                    'phase': freq_data.get('phase', []),
+                    'doppler': doppler_velocities
+                }
+                
+                smoothing_meta[sat_id][freq] = {
+                    'window_sizes': window_sizes,
+                    'resets': resets,
+                    'reset_reasons': reset_reasons,
+                    'reset_count': reset_count,
+                    'avg_window_size': float(np.mean([w for w in window_sizes if w > 0])) if any(w > 0 for w in window_sizes) else 0.0
+                }
+        
+        
+        # --- Generate Detailed Log ---
+        log_content = []
+        # --- Generate Detailed Log ---
+        log_content = []
+        # Header is generated by GUI wrapper, so we start directly with content
+        log_content.append(f"平滑窗口最大值 (N): {max_window}")
+        log_content.append(f"平滑窗口最大值 (N): {max_window}")
+        log_content.append(f"重置阈值 (C): {reset_threshold_m:.2f} m\n")
+        
+        # Summary
+        total_sats = len(smoothing_meta)
+        total_resets_all = sum(m.get('reset_count', 0) for s in smoothing_meta.values() for m in s.values())
+        
+        log_content.append("一、统计摘要")
+        log_content.append("-" * 70)
+        log_content.append(f"总计处理卫星数: {total_sats}")
+        log_content.append(f"总计发生重置次数: {total_resets_all}\n")
+        
+        # Details
+        log_content.append("二、详细处理信息")
+        log_content.append("-" * 70)
+        
+        # Sort by satellite system/id
+        sorted_sats = sorted(smoothing_meta.keys())
+        
+        for sat_id in sorted_sats:
+            freq_map = smoothing_meta[sat_id]
+            log_content.append(f"卫星 {sat_id}:")
+            for freq in sorted(freq_map.keys()):
+                meta = freq_map[freq]
+                log_content.append(f"  频率 {freq}:")
+                log_content.append(f"    观测历元数: {len(meta['window_sizes'])}")
+                log_content.append(f"    重置次数: {meta['reset_count']}")
+                log_content.append(f"    平均平滑窗口: {meta['avg_window_size']:.2f}")
+                
+                if meta['resets']:
+                    log_content.append("    重置详情:")
+                    for r_idx, (epoch_idx, reason) in enumerate(zip(meta['resets'], meta['reset_reasons'])):
+                         # Limit details if too many
+                         if r_idx >= 50: 
+                             log_content.append(f"      ... (剩余 {len(meta['resets']) - 50} 个重置事件省略)")
+                             break
+                         log_content.append(f"      - 历元 {epoch_idx}: {reason}")
+                log_content.append("")
+            log_content.append("")
+            
+        return {
+            'smoothed_observations': smoothed_obs,
+            'smoothing_meta': smoothing_meta,
+            'log': '\n'.join(log_content)
+        }
+
+    # ------------------------------------------------------------------------
+    # Doppler Phase Prediction (Ported from analyzer.py)
+    # ------------------------------------------------------------------------
+    def run_doppler_phase_prediction(self, observations_meters: Dict[str, Any], frequencies: Dict[str, float],
+                                     wavelengths: Dict[str, Dict[str, float]], 
+                                     original_rinex_path: str = None,
+                                     output_path: str = None,
+                                     writer: Optional[RinexWriter] = None) -> Dict[str, Any]:
+        """Perform Doppler-based phase prediction to repair cycle slips/gaps."""
+        
+        prediction_results = {
+            'predicted_phases': {},
+            'missing_epochs': {},
+            'correction_log': [],
+            'total_missing': 0,
+            'total_predicted': 0,
+            'sv_missing_stats': {} # {sv: {'missing': N, 'predicted': M}}
+        }
+        
+        for sat_id, sat_obs in observations_meters.items():
+            sat_system = sat_id[0]
+            
+            sat_prediction = {}
+            sat_missing_epochs = {}
+            sv_stats = {'missing': 0, 'predicted': 0}
+            
+            for freq, freq_data in sat_obs.items():
+                if 'phase' not in freq_data or 'doppler' not in freq_data:
+                    continue
+                
+                phase_values = freq_data['phase'] # List of cycles
+                doppler_values = freq_data['doppler'] # m/s
+                times = freq_data['times']
+                
+                if not (len(phase_values) == len(doppler_values) == len(times)):
+                    continue
+                    
+                wavelength = wavelengths.get(sat_id, {}).get(freq)
+                if not wavelength and sat_system in wavelengths and freq in wavelengths[sat_system]:
+                     wavelength = wavelengths[sat_system][freq]
+                if not wavelength:
+                    continue
+                    
+                frequency = frequencies.get(freq, 1575.42e6)
+                
+                freq_prediction = {
+                    'times': [],
+                    'original_phases': [],
+                    'predicted_phases': [],
+                    'is_predicted': [],
+                    'prediction_details': []
+                }
+                missing_epochs = []
+                
+                for i in range(len(times)):
+                    if phase_values[i] is None or phase_values[i] == 0:
+                        missing_epochs.append(i)
+                        sv_stats['missing'] += 1
+                        
+                        predicted_phase_m = self._predict_phase_at_epoch(
+                            i, times, phase_values, doppler_values, frequency, wavelength
+                        )
+                        
+                        if predicted_phase_m is not None:
+                            phase_values[i] = predicted_phase_m 
+                            sv_stats['predicted'] += 1
+                            
+                            freq_prediction['times'].append(times[i])
+                            freq_prediction['original_phases'].append(None)
+                            freq_prediction['predicted_phases'].append(predicted_phase_m / wavelength)
+                            freq_prediction['is_predicted'].append(True)
+                            
+                            detail = {
+                                'epoch_idx': i,
+                                'epoch_indices': i,  # ✅ 添加epoch_indices用于精确映射
+                                'sat_id': sat_id,
+                                'freq': freq,
+                                'time': times[i],
+                                'predicted_phase_cycle': predicted_phase_m / wavelength,
+                                'predicted_phase_m': predicted_phase_m
+                            }
+                            freq_prediction['prediction_details'].append(detail)
+                            prediction_results['correction_log'].append(detail)
+                            prediction_results['total_predicted'] += 1
+                    else:
+                        freq_prediction['times'].append(times[i])
+                        freq_prediction['original_phases'].append(phase_values[i])
+                        freq_prediction['predicted_phases'].append(phase_values[i])
+                        freq_prediction['is_predicted'].append(False)
+                        
+                sat_prediction[freq] = freq_prediction
+                sat_missing_epochs[freq] = missing_epochs
+                prediction_results['total_missing'] += len(missing_epochs)
+            
+            if sv_stats['missing'] > 0:
+                prediction_results['sv_missing_stats'][sat_id] = sv_stats
+
+            if sat_prediction:
+                prediction_results['predicted_phases'][sat_id] = sat_prediction
+                prediction_results['missing_epochs'][sat_id] = sat_missing_epochs
+
+        if output_path and writer and original_rinex_path:
+             writer.write_doppler_predicted_rinex(original_rinex_path, output_path, prediction_results)
+             
+        return prediction_results
+
+    def _predict_phase_at_epoch(self, target_idx, times, phase_values, doppler_values,
+                                frequency, wavelength):
+        """Helper: predict phase (meters) at target index using neighbor doppler values."""
+        if target_idx <= 0: return None
+        prev_phase_m = phase_values[target_idx - 1] # in meters
+        if prev_phase_m is None: return None
+        
+        prev_doppler = doppler_values[target_idx - 1] # m/s (range rate)
+        curr_doppler = doppler_values[target_idx] # m/s (range rate)
+        if prev_doppler is None or curr_doppler is None: return None
+        
+        try:
+            time_diff = (times[target_idx] - times[target_idx - 1]).total_seconds()
+        except:
+            return None
+        if time_diff <= 0: return None
+        
+        # Physics: dPhi_m = -range_rate * dt
+        # Range rate dot(rho) is stored in doppler_values.
+        # Phase (meters) decreases as range increases, so dPhi = -dRho.
+        doppler_mean = (prev_doppler + curr_doppler) / 2.0
+        phase_change_m = -doppler_mean * time_diff
+        
+        predicted_phase_m = prev_phase_m + phase_change_m
+        return predicted_phase_m
+

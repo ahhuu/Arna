@@ -38,6 +38,18 @@ class VisualizationWindow:
     def plot_isb(self, save: bool = True, output_dir: Optional[str] = None):
         return self.plotter.plot_isb_analysis(self.context.results.get('isb_analysis', {}), save=save, output_dir=output_dir)
 
+    def plot_inter_freq_bias(self, freq1: str, freq2: str, constellation: Optional[str] = None, 
+                            save: bool = True, output_dir: Optional[str] = None):
+        """Plot inter-frequency bias analysis with ISD correction."""
+        from src.processing.inter_freq_bias import InterFrequencyBiasAnalyzer
+        analyzer = InterFrequencyBiasAnalyzer()
+        analysis_result = analyzer.analyze_inter_freq_bias(
+            self.context.observations_meters,
+            freq1, freq2, constellation
+        )
+        self.context.results['inter_freq_bias'] = analysis_result
+        return self.plotter.plot_inter_freq_bias(analysis_result, save=save, output_dir=output_dir)
+
     def show(self, parent):
         try:
             import tkinter as tk
@@ -47,7 +59,7 @@ class VisualizationWindow:
 
         top = tk.Toplevel(parent)
         top.title('图表生成')
-        top.geometry('600x600')  # Reduced size since plots are popups
+        top.geometry('800x850')  # Increased size
         top.transient(parent)
         top.grab_set()
 
@@ -62,7 +74,11 @@ class VisualizationWindow:
         file_entry.pack(side=tk.LEFT, padx=(0,10), fill=tk.X, expand=True)
 
         def select_file():
-            f = filedialog.askopenfilename(title='选择RINEX观测文件')
+            file_types = [
+                ("RINEX Files", "*.??O *.??o *.RNX *.rnx"),
+                ("All Files", "*.*")
+            ]
+            f = filedialog.askopenfilename(title='选择RINEX观测文件', filetypes=file_types)
             if f:
                 file_var.set(f)
                 load_satellite_info()
@@ -80,7 +96,8 @@ class VisualizationWindow:
             ('历元间双差', 'double_differences'),
             ('ISB分析', 'isb_analysis'),
             ('接收机CMC', 'receiver_cmc'),
-            ('周跳探测分析 (MW & GF)', 'cycle_slip_detection')
+            ('周跳探测分析 (MW & GF)', 'cycle_slip_detection'),
+            ('伪距频间偏差与ISD验证', 'inter_freq_bias')
         ]
         chart_var = tk.StringVar(value='raw_observations')
         
@@ -145,7 +162,11 @@ class VisualizationWindow:
         rx_entry.pack(side=tk.LEFT, padx=(0,10), fill=tk.X, expand=True)
 
         def select_rx():
-            f = filedialog.askopenfilename(title='选择接收机RINEX文件')
+            file_types = [
+                ("RINEX Files", "*.??O *.??o *.RNX *.rnx"),
+                ("All Files", "*.*")
+            ]
+            f = filedialog.askopenfilename(title='选择接收机RINEX文件', filetypes=file_types)
             if f:
                 rx_var.set(f)
                 load_receiver_satellite_info()
@@ -559,8 +580,70 @@ class VisualizationWindow:
                     if not self.context.observations_meters:
                         messagebox.showerror('错误', '请先加载手机RINEX文件')
                         return
+                    
+                    # 伪距频间偏差分析
+                    if chart_type == 'inter_freq_bias':
+                        status_var.set('正在计算频间偏差...')
+                        top.update_idletasks()
                         
-                    if chart_type == 'raw_observations':
+                        # 解析频率组合
+                        freq_pair_selection = freq_pair_var.get()
+                        if not freq_pair_selection or freq_pair_selection == '自动选择':
+                            # 自动选择第一个可用的频率对
+                            system = sat[0] if sat else None
+                            from src.core.config import GNSS_FREQUENCIES
+                            if system and system in GNSS_FREQUENCIES:
+                                freq_keys = list(GNSS_FREQUENCIES[system].keys())
+                                if len(freq_keys) >= 2:
+                                    freq1_name, freq2_name = freq_keys[0], freq_keys[1]
+                                else:
+                                    messagebox.showerror('错误', f'系统 {system} 的频率数量不足')
+                                    return
+                            else:
+                                messagebox.showerror('错误', '无法确定频率组合，请手动选择')
+                                return
+                        else:
+                            parts = [p.strip() for p in freq_pair_selection.split('+') if p.strip()]
+                            if len(parts) == 2:
+                                freq1_name, freq2_name = parts[0], parts[1]
+                            else:
+                                messagebox.showerror('错误', '频率组合格式错误')
+                                return
+                        
+                        # 执行分析
+                        try:
+                            from src.processing.inter_freq_bias import InterFrequencyBiasAnalyzer
+                            analyzer = InterFrequencyBiasAnalyzer()
+                            
+                            # 获取星座系统（可选过滤）
+                            system = sat_system_var.get() if sat_system_var.get() else None
+                            
+                            analysis_result = analyzer.analyze_inter_freq_bias(
+                                self.context.observations_meters,
+                                freq1_name,
+                                freq2_name,
+                                constellation=system
+                            )
+                            
+                            if 'error' in analysis_result:
+                                messagebox.showerror('错误', analysis_result['error'])
+                                return
+                            
+                            # 保存到context
+                            self.context.results['inter_freq_bias'] = analysis_result
+                            
+                            # 绘图
+                            out = self.plotter.plot_inter_freq_bias(analysis_result, save=False)
+                            status_var.set('频间偏差分析完成')
+                            
+                        except Exception as e:
+                            import traceback
+                            traceback.print_exc()
+                            messagebox.showerror('错误', f'频间偏差分析失败: {e}')
+                            status_var.set('分析失败')
+                            return
+                    
+                    elif chart_type == 'raw_observations':
                         out = self.plotter.plot_raw_observations({'observations_meters': self.context.observations_meters}, sat, save=False)
                     else:
                         pre_calculate_metrics()
@@ -594,10 +677,22 @@ class VisualizationWindow:
              if not self.context.observations_meters:
                  messagebox.showwarning('警告', '无数据')
                  return
-             out_dir = filedialog.askdirectory(title='选择保存目录')
-             if not out_dir: return
              
-             status_var.set('正在批量保存所有图表...')
+             # Auto-detect output dir
+             phone_file = file_var.get()
+             if not phone_file:
+                 messagebox.showwarning('警告', '未选择文件')
+                 return
+             
+             base_dir = os.path.dirname(phone_file)
+             obs_name = os.path.splitext(os.path.basename(phone_file))[0]
+             
+             # Root results dir: input_dir/Arna_results/filename/visualization/
+             project_dir = os.path.join(base_dir, "Arna_results", obs_name, "visualization")
+             if not os.path.exists(project_dir):
+                 os.makedirs(project_dir)
+             
+             status_var.set(f'正在保存至: {project_dir} ...')
              top.update_idletasks()
              
              try:
@@ -605,14 +700,17 @@ class VisualizationWindow:
                  sats = sorted(self.context.observations_meters.keys())
                  count = 0
                  
+                 # Raw Folder
+                 raw_dir = os.path.join(project_dir, 'Raw_observations')
+                 if not os.path.exists(raw_dir): os.makedirs(raw_dir)
+                 
                  # Save Raw for all sats
                  for sat in sats:
-                     self.plotter.plot_raw_observations({'observations_meters': self.context.observations_meters}, sat, save=True, output_dir=out_dir)
+                     self.plotter.plot_raw_observations({'observations_meters': self.context.observations_meters}, sat, save=True, output_dir=raw_dir)
                      count += 1
                      
-                 # Add other batch saves here if needed, but start with raw
                  status_var.set(f'批量保存完成: {count} 张')
-                 messagebox.showinfo('完成', '批量保存完成')
+                 messagebox.showinfo('完成', f'批量保存完成\n保存路径: {project_dir}')
              except Exception as e:
                  messagebox.showerror('错误', f'保存失败: {e}')
 
@@ -620,11 +718,40 @@ class VisualizationWindow:
              if not self.context.observations_meters:
                  messagebox.showwarning('警告', '无数据')
                  return
-             chart_type = chart_var.get()
-             out_dir = filedialog.askdirectory(title='选择保存目录')
-             if not out_dir: return
              
-             status_var.set(f'正在批量保存 {chart_type}...')
+             phone_file = file_var.get()
+             if not phone_file:
+                 messagebox.showwarning('警告', '未选择文件')
+                 return
+
+             base_dir = os.path.dirname(phone_file)
+             obs_name = os.path.splitext(os.path.basename(phone_file))[0]
+             
+             # Root results dir: input_dir/Arna_results/filename/visualization/
+             project_dir = os.path.join(base_dir, "Arna_results", obs_name, "visualization")
+             if not os.path.exists(project_dir):
+                 os.makedirs(project_dir)
+             
+             chart_type = chart_var.get()
+             
+             # Map chart_type to Folder Name
+             folder_map = {
+                 'raw_observations': 'Raw_observations',
+                 'derivatives': 'Derivatives',
+                 'code_phase_diffs': 'Code_phase_diffs',
+                 'code_phase_diff_raw': 'Code_phase_diffs_raw',
+                 'phase_pred_errors': 'Prediction_errors',
+                 'double_differences': 'Double_differences', 
+                 'isb_analysis': 'ISB_analysis',
+                 'receiver_cmc': 'Receiver_CMC',
+                 'cycle_slip_detection': 'Cycle_slips',
+                 'inter_freq_bias': 'Inter_freq_bias'
+             }
+             folder_name = folder_map.get(chart_type, chart_type)
+             target_dir = os.path.join(project_dir, folder_name)
+             if not os.path.exists(target_dir): os.makedirs(target_dir)
+
+             status_var.set(f'正在批量保存 {chart_type} 至 {target_dir}...')
              top.update_idletasks()
              
              try:
@@ -633,14 +760,8 @@ class VisualizationWindow:
                      from src.processing.cycle_slip_detector import CycleSlipDetector
                      from src.reporting.cycle_slip_logger import CycleSlipLogger
                      
-                     # 构建保存路径
-                     phone_file = file_var.get()
-                     if phone_file:
-                         filename = os.path.splitext(os.path.basename(phone_file))[0]
-                         cycleslip_dir = os.path.join(out_dir, filename, 'cycleslips')
-                     else:
-                         cycleslip_dir = os.path.join(out_dir, 'cycleslips')
-                     os.makedirs(cycleslip_dir, exist_ok=True)
+                     # Check Cycle_slips subfolder (target_dir)
+                     cycleslip_dir = target_dir
                      
                      # 解析频率组合选择
                      freq_pair_selection = freq_pair_var.get()
@@ -698,31 +819,57 @@ class VisualizationWindow:
                              continue
                      
                      status_var.set(f'批量保存完成: {count} 张周跳探测图')
-                     messagebox.showinfo('完成', f'已保存 {count} 张周跳探测图表')
+                     messagebox.showinfo('完成', f'已保存 {count} 张周跳探测图表\n目录: {cycleslip_dir}')
                      return
                  
                  pre_calculate_metrics()
                  sats = sorted(self.context.observations_meters.keys())
                  count = 0
-                 for sat in sats:
-                     freqs = list(self.context.observations_meters[sat].keys())
-                     for freq in freqs:
-                        try:
-                            if chart_type == 'raw_observations':
-                                self.plotter.plot_raw_observations({'observations_meters': self.context.observations_meters}, sat, save=True, output_dir=out_dir)
-                                count += 1; break 
-                            elif chart_type == 'derivatives':
-                                self.plotter.plot_derivatives(self.context.results['observable_derivatives'], sat, freq, save=True, output_dir=out_dir)
-                                count += 1
-                            elif chart_type == 'phase_pred_errors':
-                                self.plotter.plot_prediction_errors(self.context.results.get('phase_prediction_errors', {}), sat, freq, save=True, output_dir=out_dir)
-                                count += 1
-                            # Add others...
-                        except: continue
+                 
+                 # For ISB, it's one plot total usually, or per constellation?
+                 if chart_type == 'isb_analysis':
+                      # We need ISB data
+                      if 'isb_analysis' not in self.context.results:
+                            messagebox.showerror('错误', '请先进行ISB分析或加载数据')
+                            return
+                      # Plot
+                      self.plotter.plot_isb_analysis(self.context.results['isb_analysis'], save=True, output_dir=target_dir)
+                      count = 1
+                 else:
+                     for sat in sats:
+                         freqs = list(self.context.observations_meters[sat].keys())
+                         
+                         # Some plots are per-sat (raw), some per-sat-freq
+                         if chart_type == 'raw_observations':
+                              try:
+                                  self.plotter.plot_raw_observations({'observations_meters': self.context.observations_meters}, sat, save=True, output_dir=target_dir)
+                                  count += 1
+                              except: pass
+                         else:
+                             for freq in freqs:
+                                try:
+                                    if chart_type == 'derivatives':
+                                        self.plotter.plot_derivatives(self.context.results['observable_derivatives'], sat, freq, save=True, output_dir=target_dir)
+                                        count += 1
+                                    elif chart_type == 'phase_pred_errors':
+                                        self.plotter.plot_prediction_errors(self.context.results.get('phase_prediction_errors', {}), sat, freq, save=True, output_dir=target_dir)
+                                        count += 1
+                                    elif chart_type == 'code_phase_diffs':
+                                         self.plotter.plot_code_phase_diff_variation({'code_phase_differences': self.context.results['code_phase_differences']}, sat, freq, save=True, output_dir=target_dir)
+                                         count += 1
+                                    elif chart_type == 'code_phase_diff_raw':
+                                         self.plotter.plot_code_phase_raw_diff({'code_phase_differences': self.context.results['code_phase_differences']}, sat, freq, save=True, output_dir=target_dir)
+                                         count += 1
+                                    elif chart_type == 'double_differences':
+                                         self.plotter.plot_epoch_double_diffs({'epoch_double_diffs': self.context.results['epoch_double_diffs']}, sat, freq, save=True, output_dir=target_dir)
+                                         count += 1
+                                except: continue
                  
                  status_var.set(f'批量保存完成: {count} 张')
-                 messagebox.showinfo('完成', f'已保存 {count} 张图表')
+                 messagebox.showinfo('完成', f'已保存 {count} 张图表\n目录: {target_dir}')
              except Exception as e:
+                 import traceback
+                 traceback.print_exc()
                  messagebox.showerror('错误', f'保存失败: {e}')
 
         ttk.Button(btn_frame, text='生成图表', command=gen_chart).pack(side=tk.LEFT, padx=15)

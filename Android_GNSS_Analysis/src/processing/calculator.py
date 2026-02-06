@@ -165,6 +165,7 @@ class MetricCalculator:
                     'times': [],
                     'code_phase_diff': [],
                     'diff_changes': [],
+                    'epoch_indices': [],  # 新增：记录原始历元索引
                     'original_epochs': len(times),
                     'filtered_epochs': 0,
                     'stagnant_epochs_removed': len(stagnant_epochs),
@@ -181,6 +182,7 @@ class MetricCalculator:
                     diff = code_values[i] - phase_values[i]
                     freq_differences[freq]['times'].append(times[i])
                     freq_differences[freq]['code_phase_diff'].append(diff)
+                    freq_differences[freq]['epoch_indices'].append(i)  # 新增：记录原始索引
                     if prev_diff is not None:
                         freq_differences[freq]['diff_changes'].append(abs(diff - prev_diff))
                     else:
@@ -260,7 +262,8 @@ class MetricCalculator:
                     'predicted_phase': [],
                     'prediction_error': [],
                     'doppler_mps': [],
-                    'doppler_hz': []
+                    'doppler_hz': [],
+                    'epoch_indices': []  # 新增：记录原始历元索引
                 }
 
                 for i in range(1, len(times)):
@@ -280,6 +283,7 @@ class MetricCalculator:
                         freq_errors[freq]['prediction_error'].append(error)
                         freq_errors[freq]['doppler_mps'].append((doppler_mps[i - 1] + doppler_mps[i]) / 2)
                         freq_errors[freq]['doppler_hz'].append(doppler_arith)
+                        freq_errors[freq]['epoch_indices'].append(i)  # 新增：记录原始历元索引
 
                 if freq_errors[freq]['times']:
                     freq_errors[freq]['total_errors'] = len(freq_errors[freq]['prediction_error'])
@@ -339,13 +343,21 @@ class MetricCalculator:
                 code = d.get('code', [])
                 phase = d.get('phase', [])
                 dop = d.get('doppler', [])
+                times = d.get('times', [])
                 n = len(code)
                 if n < 3:
                     continue
                 dd_code = []
                 dd_phase = []
                 dd_dop = []
+                dd_times = []  # 新增：记录时间
+                dd_epoch_indices = []  # 新增：记录原始历元索引
                 for i in range(n - 2):
+                    # 双差使用i, i+1, i+2三个历元，结果对应第i+2个历元
+                    if i + 2 < len(times):
+                        dd_times.append(times[i + 2])
+                    dd_epoch_indices.append(i + 2)  # 记录双差对应的历元索引
+                    
                     # code
                     a = code[i]
                     b = code[i + 1]
@@ -380,10 +392,11 @@ class MetricCalculator:
                         dd_dop.append(None)
 
                 result[sat_id][freq] = {
-                    'times': d.get('times', [])[2:],
+                    'times': dd_times if dd_times else d.get('times', [])[2:],
                     'dd_code': dd_code,
                     'dd_phase': dd_phase,
-                    'dd_doppler': dd_dop
+                    'dd_doppler': dd_dop,
+                    'epoch_indices': dd_epoch_indices  # 新增：双差对应的历元索引
                 }
         return result
 

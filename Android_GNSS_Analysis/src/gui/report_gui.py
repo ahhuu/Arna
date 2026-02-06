@@ -45,7 +45,8 @@ class ReportWindow:
         btn_frame.pack(fill=tk.X, padx=6, pady=6)
 
         def on_save():
-            out = filedialog.asksaveasfilename(title='保存报告', defaultextension='.txt')
+            file_types = [("Text Files", "*.txt"), ("All Files", "*.*")]
+            out = filedialog.asksaveasfilename(title='保存报告', defaultextension='.txt', filetypes=file_types)
             if out:
                 path = self.save_report(out.rsplit('/', 1)[0], prefix=out.rsplit('/', 1)[-1])
                 tk.messagebox.showinfo('完成', f'报告已保存: {path}')
