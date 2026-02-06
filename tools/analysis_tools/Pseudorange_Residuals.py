@@ -465,13 +465,14 @@ def remove_clock_bias(residuals):
 
 
 # 6. 主函数
-def main(mobile_rinex, base_rinex, sat_pos_path, mobile_coords, base_coords):
+def main(mobile_rinex, base_rinex, sat_pos_path, mobile_coords, base_coords, output_dir=None):
     start_time = time.time()
 
     # 1. 创建输出目录：results/手机RINEX文件名（不含扩展名）
     mobile_filename = os.path.basename(mobile_rinex)
     mobile_basename = os.path.splitext(mobile_filename)[0]  # 去除扩展名
-    output_dir = os.path.join('results', mobile_basename)
+    if output_dir is None:
+        output_dir = os.path.join('results', mobile_basename)
     Path(output_dir).mkdir(parents=True, exist_ok=True)  # 递归创建目录
 
     # 2. 初始化调试列表
