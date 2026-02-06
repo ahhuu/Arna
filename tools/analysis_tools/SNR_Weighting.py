@@ -39,45 +39,75 @@ def error_function(params, model, x, y):
     return model(params, *x) - y ** 2
 
 
+def sigma_clip(subset, sigma=3.0):
+    """剔除残差平方超过 sigma * std 的极端离群点"""
+    residuals_sq = subset['residual'].values ** 2
+    mean_sq = np.mean(residuals_sq)
+    std_sq = np.std(residuals_sq)
+    limit = mean_sq + sigma * std_sq
+    return subset[residuals_sq <= limit]
+
+
 # 模型拟合函数
 def fit_elevation_model(x, y):
-    p0 = [1, 1]
-    return curve_fit(elevation_model, x, y ** 2, p0=p0)[0]
+    # a, b must be positive. p0[1] is typically large (100) for noise factor
+    p0 = [1.0, 100.0]
+    # bounds=(0, np.inf) ensures physical consistency: a >= 0, b >= 0
+    return curve_fit(elevation_model, x, y ** 2, p0=p0, bounds=(0, np.inf))[0]
 
 
 def fit_snr_model(x, y):
-    p0 = [1, 100]
-    return curve_fit(snr_model, x, y ** 2, p0=p0)[0]
+    p0 = [1.0, 100.0]
+    # bounds=(0, np.inf) ensures sigma^2 = a + b*10^(-SNR/10) where a,b > 0
+    return curve_fit(snr_model, x, y ** 2, p0=p0, bounds=(0, np.inf))[0]
 
 
 def fit_linear_snr_model(x, y):
-    p0 = [0.1, 10]
-    return curve_fit(linear_snr_model, x, y ** 2, p0=p0)[0]
+    # For linear model: σ² = a * SNR + b
+    # Usually a is negative (SNR up -> error down).
+    # But for simplicity and consistency with raPPPid, we use bounds or handle directions.
+    p0 = [-0.1, 50.0]
+    # We allow 'a' to be negative for linear model because that's the physical direction
+    # but we bound 'b' to be positive.
+    return curve_fit(linear_snr_model, x, y ** 2, p0=p0, bounds=([-np.inf, 0], [0, np.inf]))[0]
 
 
 def fit_combined_model(x, y):
     x_comb = (x[0], x[1])
-    p0 = [1, 1, 100]
-    return least_squares(error_function, p0, args=(combined_model, x_comb, y)).x
+    p0 = [1.0, 1.0, 100.0]
+    # Use robust loss 'soft_l1' to mitigate impact of systematic outliers / "bumps"
+    # bounds=(0, np.inf) ensures a, b, c are all positive
+    return least_squares(error_function, p0, args=(combined_model, x_comb, y), 
+                         bounds=(0, np.inf), loss='soft_l1').x
 
 
 # 生成模型信息文本函数
 def generate_model_info(system, freq, data_count,
                         elev_params, snr_params, linear_snr_params, combined_params):
+    
+    def fmt_val(v):
+        # 即使是极小的数也要显示出来，避免 0.0000 误导
+        return f"{v:.4f}"
+
+    def check_const(params, name):
+        if len(params) > 1 and abs(params[1]) < 1e-6:
+            return f" (警告: 拟合系数趋近0，该频段{name}规律不明显，建议作为常量处理)"
+        return ""
+
     model_info = f"""
 卫星系统: {system}, 频率: {freq}, 数据量: {data_count}
 
 高度角模型：
-σ² = {elev_params[0]:.4f}+{elev_params[1]:.4f}./sin(e).^2
+σ² = {fmt_val(elev_params[0])}+{fmt_val(elev_params[1])}./sin(e).^2{check_const(elev_params, '高度角')}
 
 指数信噪比模型：
-σ² = {snr_params[0]:.4f}+{snr_params[1]:.4f}.*10.^(-SNR/10)
+σ² = {fmt_val(snr_params[0])}+{fmt_val(snr_params[1])}.*10.^(-SNR/10){check_const(snr_params, '信噪比')}
 
 线性信噪比模型：
-σ² = {linear_snr_params[0]:.4f}.*SNR+{linear_snr_params[1]:.4f}
+σ² = ({fmt_val(linear_snr_params[0])}).*SNR+{fmt_val(linear_snr_params[1])}
 
 联合模型：
-σ² = {combined_params[0]:.4f}+{combined_params[1]:.4f}./sin(e).^2+{combined_params[2]:.4f}.*10.^(-SNR/10)
+σ² = {fmt_val(combined_params[0])}+{fmt_val(combined_params[1])}./sin(e).^2+{fmt_val(combined_params[2])}.*10.^(-SNR/10)
 """
     return model_info
 
@@ -89,11 +119,23 @@ def visualize_elevation_model(ax, subset, a_elev, b_elev, system, freq, data_cou
     elev_range_rad = np.radians(elev_range)
     # 绘制方差拟合曲线
     variance_pred = elevation_model(elev_range_rad, a_elev, b_elev)
-    ax.plot(elev_range, variance_pred, 'r-', linewidth=2, label='拟合曲线')
+    ax.plot(elev_range, variance_pred, 'r-', linewidth=2, label='拟合误差(σ²)')
+    
+    # 添加权重次坐标轴
+    ax_w = ax.twinx()
+    weight_pred = 1.0 / variance_pred
+    ax_w.plot(elev_range, weight_pred, 'k--', alpha=0.6, label='对应权重趋势')
+    ax_w.set_ylabel('权重 (1/σ²)', color='gray')
+    ax_w.tick_params(axis='y', labelcolor='gray')
+
     ax.set_xlabel('高度角 (°)')
     ax.set_ylabel('伪距残差平方 (m²)')
     ax.set_title('高度角模型')
-    ax.legend()
+    
+    # 合并图例
+    lines, labels = ax.get_legend_handles_labels()
+    lines2, labels2 = ax_w.get_legend_handles_labels()
+    ax.legend(lines + lines2, labels + labels2, loc='upper right')
 
 
 def visualize_snr_model(ax, subset, a_snr, b_snr, system, freq, data_count):
@@ -101,11 +143,23 @@ def visualize_snr_model(ax, subset, a_snr, b_snr, system, freq, data_count):
     snr_range = np.linspace(min(subset['snr']), max(subset['snr']), 100)
     # 绘制方差拟合曲线
     variance_pred = snr_model(snr_range, a_snr, b_snr)
-    ax.plot(snr_range, variance_pred, 'g-', linewidth=2, label='拟合曲线')
+    ax.plot(snr_range, variance_pred, 'g-', linewidth=2, label='拟合误差(σ²)')
+    
+    # 添加权重次坐标轴 (展示 1/σ² 的趋势)
+    ax_w = ax.twinx()
+    weight_pred = 1.0 / variance_pred
+    ax_w.plot(snr_range, weight_pred, 'k--', alpha=0.6, label='对应权重趋势')
+    ax_w.set_ylabel('权重 (1/σ²)', color='gray')
+    ax_w.tick_params(axis='y', labelcolor='gray')
+    
     ax.set_xlabel('信噪比 (dB-Hz)')
     ax.set_ylabel('伪距残差平方 (m²)')
     ax.set_title('指数信噪比模型')
-    ax.legend()
+    
+    # 合并图例
+    lines, labels = ax.get_legend_handles_labels()
+    lines2, labels2 = ax_w.get_legend_handles_labels()
+    ax.legend(lines + lines2, labels + labels2, loc='upper right')
 
 
 def visualize_linear_snr_model(ax, subset, a_linear_snr, b_linear_snr, system, freq, data_count):
@@ -123,22 +177,19 @@ def visualize_linear_snr_model(ax, subset, a_linear_snr, b_linear_snr, system, f
 def visualize_combined_model(ax, subset, a_comb, b_comb, c_comb, system, freq, data_count):
     # 按历元排序数据
     subset_sorted = subset.sort_values('epoch')
-    
-    # 创建历元（从1开始）
     subset_sorted = subset_sorted.copy()
-    subset_sorted['epoch_num'] = range(1, len(subset_sorted) + 1)
     
     # 创建双y轴
     ax2 = ax.twinx()
     
     # 绘制伪距残差平方随历元变化 - 显示所有数据点，使用更小的点
-    ax.scatter(subset_sorted['epoch_num'], subset_sorted['residual'] ** 2, 
+    ax.scatter(subset_sorted['epoch'], subset_sorted['residual'] ** 2, 
               alpha=0.4, s=6, color='red', label='伪距残差平方')
     ax.set_xlabel('历元')
     ax.set_ylabel('伪距残差平方（m²）', color='red')
     ax.tick_params(axis='y', labelcolor='red')
     
-    # 设置伪距残差平方的y轴范围
+    # 设置伔距残差平方的y轴范围
     residual_squared = subset_sorted['residual'] ** 2
     residual_min, residual_max = residual_squared.min(), residual_squared.max()
     residual_range = residual_max - residual_min
@@ -148,7 +199,7 @@ def visualize_combined_model(ax, subset, a_comb, b_comb, c_comb, system, freq, d
         ax.set_ylim(residual_min - margin, residual_max + margin)
     
     # 绘制高度角随历元变化 - 使用散点
-    ax2.scatter(subset_sorted['epoch_num'], subset_sorted['ele'], 
+    ax2.scatter(subset_sorted['epoch'], subset_sorted['ele'], 
                alpha=0.6, s=6, color='blue', label='高度角')
     ax2.set_ylabel('高度角（°）', color='blue')
     ax2.tick_params(axis='y', labelcolor='blue')
@@ -167,7 +218,7 @@ def visualize_combined_model(ax, subset, a_comb, b_comb, c_comb, system, freq, d
     if 'snr' in subset_sorted.columns and not subset_sorted['snr'].isna().all():
         ax3 = ax.twinx()
         ax3.spines['right'].set_position(('outward', 60))
-        ax3.scatter(subset_sorted['epoch_num'], subset_sorted['snr'], 
+        ax3.scatter(subset_sorted['epoch'], subset_sorted['snr'], 
                    alpha=0.6, s=6, color='green', label='信噪比')
         ax3.set_ylabel('信噪比（dB-Hz）', color='green')
         ax3.tick_params(axis='y', labelcolor='green')
@@ -185,13 +236,17 @@ def visualize_combined_model(ax, subset, a_comb, b_comb, c_comb, system, freq, d
     ax.set_title('联合模型 - 伪距残差平方随历元变化')
     ax.grid(True, alpha=0.3)
     
-    # 优化x轴刻度显示
-    max_epoch = len(subset_sorted)
-    if max_epoch > 20:
-        step = max(1, max_epoch // 10)  # 最多显示10个刻度
-        ax.set_xticks(range(1, max_epoch + 1, step))
-    else:
-        ax.set_xticks(range(1, max_epoch + 1))
+    # 优化x轴刻度显示：最小历元、200、400...最大历元
+    epochs = subset_sorted['epoch'].values
+    min_epoch = int(np.min(epochs))
+    max_epoch = int(np.max(epochs))
+    tick_epochs = [min_epoch]
+    for ep in range(200, max_epoch, 200):
+        if ep > min_epoch:
+            tick_epochs.append(ep)
+    if max_epoch not in tick_epochs:
+        tick_epochs.append(max_epoch)
+    ax.set_xticks(tick_epochs)
     
     # 合并图例
     lines1, labels1 = ax.get_legend_handles_labels()
@@ -234,15 +289,13 @@ def visualize_individual_combined_models(subset, system, freq, output_dir):
         prn_data = subset[subset['prn'] == prn].sort_values('epoch')
         
         if len(prn_data) > 0:
-            # 创建历元（从1开始）
             prn_data = prn_data.copy()
-            prn_data['epoch_num'] = range(1, len(prn_data) + 1)
             
             # 创建双y轴
             ax2 = ax.twinx()
             
             # 绘制伪距残差随历元变化 - 显示所有数据点，使用更小的点
-            ax.scatter(prn_data['epoch_num'], prn_data['residual'], 
+            ax.scatter(prn_data['epoch'], prn_data['residual'], 
                       alpha=0.4, s=6, color='red', label='伪距残差')
             ax.set_xlabel('历元')
             ax.set_ylabel('伪距残差（m）', color='red')
@@ -257,7 +310,7 @@ def visualize_individual_combined_models(subset, system, freq, output_dir):
                 ax.set_ylim(residual_min - margin, residual_max + margin)
             
             # 绘制高度角随历元变化 - 使用散点
-            ax2.scatter(prn_data['epoch_num'], prn_data['ele'], 
+            ax2.scatter(prn_data['epoch'], prn_data['ele'], 
                        alpha=0.6, s=6, color='blue', label='高度角')
             ax2.set_ylabel('高度角（°）', color='blue')
             ax2.tick_params(axis='y', labelcolor='blue')
@@ -276,7 +329,7 @@ def visualize_individual_combined_models(subset, system, freq, output_dir):
             if 'snr' in prn_data.columns and not prn_data['snr'].isna().all():
                 ax3 = ax.twinx()
                 ax3.spines['right'].set_position(('outward', 60))
-                ax3.scatter(prn_data['epoch_num'], prn_data['snr'], 
+                ax3.scatter(prn_data['epoch'], prn_data['snr'], 
                            alpha=0.6, s=6, color='green', label='信噪比')
                 ax3.set_ylabel('信噪比（dB-Hz）', color='green')
                 ax3.tick_params(axis='y', labelcolor='green')
@@ -294,13 +347,17 @@ def visualize_individual_combined_models(subset, system, freq, output_dir):
             ax.set_title(f'PRN {prn} - 频率 {freq}')
             ax.grid(True, alpha=0.3)
             
-            # 优化x轴刻度显示
-            max_epoch = len(prn_data)
-            if max_epoch > 20:
-                step = max(1, max_epoch // 10)  # 最多显示10个刻度
-                ax.set_xticks(range(1, max_epoch + 1, step))
-            else:
-                ax.set_xticks(range(1, max_epoch + 1))
+            # 优化x轴刻度显示：最小历元、200、400...最大历元
+            epochs = prn_data['epoch'].values
+            min_epoch = int(np.min(epochs))
+            max_epoch = int(np.max(epochs))
+            tick_epochs = [min_epoch]
+            for ep in range(200, max_epoch, 200):
+                if ep > min_epoch:
+                    tick_epochs.append(ep)
+            if max_epoch not in tick_epochs:
+                tick_epochs.append(max_epoch)
+            ax.set_xticks(tick_epochs)
     
     # 隐藏多余的子图
     for i in range(n_prns, n_rows * n_cols):
@@ -350,23 +407,25 @@ def visualize_epoch_residuals(subset, system, freq, output_dir):
         prn_data = subset[subset['prn'] == prn].sort_values('epoch')
         
         if len(prn_data) > 0:
-            # 创建历元（从1开始）
             prn_data = prn_data.copy()
-            prn_data['epoch_num'] = range(1, len(prn_data) + 1)
             
-            ax.scatter(prn_data['epoch_num'], prn_data['residual'], alpha=0.7, s=15, color='red')
+            ax.scatter(prn_data['epoch'], prn_data['residual'], alpha=0.7, s=15, color='red')
             ax.set_title(f'PRN {prn} - 频率 {freq}')
             ax.set_xlabel('历元')
             ax.set_ylabel('伪距残差 (m)')
             ax.grid(True, alpha=0.3)
             
-            # 优化x轴刻度显示
-            max_epoch = len(prn_data)
-            if max_epoch > 20:
-                step = max(1, max_epoch // 10)  # 最多显示10个刻度
-                ax.set_xticks(range(1, max_epoch + 1, step))
-            else:
-                ax.set_xticks(range(1, max_epoch + 1))
+            # 优化x轴刻度显示：最小历元、200、400...最大历元
+            epochs = prn_data['epoch'].values
+            min_epoch = int(np.min(epochs))
+            max_epoch = int(np.max(epochs))
+            tick_epochs = [min_epoch]
+            for ep in range(200, max_epoch, 200):
+                if ep > min_epoch:
+                    tick_epochs.append(ep)
+            if max_epoch not in tick_epochs:
+                tick_epochs.append(max_epoch)
+            ax.set_xticks(tick_epochs)
     
     # 隐藏多余的子图
     for i in range(n_prns, n_rows * n_cols):
@@ -392,7 +451,7 @@ def visualize_global_residuals(df, output_dir):
     fig, axes = plt.subplots(2, 2, figsize=(16, 12))
     fig.suptitle('手机伪距残差全局分析', fontsize=16, fontweight='bold')
     
-    # 1. 伪距残差随时间变化图
+    # 1. 伪距残差随历元变化图
     ax1 = axes[0, 0]
     
     # 按卫星-频率组合分组，为每个组合分配不同颜色
@@ -407,49 +466,33 @@ def visualize_global_residuals(df, output_dir):
     colors = plt.cm.tab20(np.linspace(0, 1, len(prn_freq_combinations)))
     prn_freq_color_map = dict(zip(prn_freq_combinations, colors))
     
-    # 创建时间轴（从第一个历元开始，以分钟:秒格式显示）
-    time_minutes = []
-    for epoch in df_sorted['epoch']:
-        if hasattr(epoch, 'minute') and hasattr(epoch, 'second'):
-            time_str = f"{epoch.minute:02d}:{epoch.second:02d}"
-        else:
-            # 如果是字符串或其他格式，尝试解析
-            try:
-                if isinstance(epoch, str):
-                    from datetime import datetime
-                    dt = datetime.strptime(epoch, '%Y-%m-%d %H:%M:%S')
-                    time_str = f"{dt.minute:02d}:{dt.second:02d}"
-                else:
-                    time_str = str(epoch)
-            except:
-                time_str = str(epoch)
-        time_minutes.append(time_str)
-    
-    df_sorted['time_display'] = time_minutes
-    
     # 为每个卫星-频率组合绘制散点图
     for prn_freq in prn_freq_combinations:
         combo_data = df_sorted[df_sorted['prn_freq'] == prn_freq]
         if len(combo_data) > 0:
-            ax1.scatter(combo_data['time_display'], combo_data['residual'], 
+            ax1.scatter(combo_data['epoch'], combo_data['residual'], 
                        alpha=0.6, s=8, color=prn_freq_color_map[prn_freq])
     
-    ax1.set_xlabel('时间 (分:秒)')
+    ax1.set_xlabel('历元')
     ax1.set_ylabel('伪距残差 (m)')
-    ax1.set_title('伪距残差随时间变化')
+    ax1.set_title('伪距残差随历元变化')
     ax1.grid(True, alpha=0.3)
-    
+
     # 设置纵坐标范围正负平均
     residual_max = np.max(np.abs(df_sorted['residual']))
     ax1.set_ylim(-residual_max, residual_max)
     
-    # 优化x轴刻度显示
-    unique_times = df_sorted['time_display'].unique()
-    if len(unique_times) > 10:
-        step = max(1, len(unique_times) // 10)
-        selected_times = unique_times[::step]
-        ax1.set_xticks(selected_times)
-        ax1.tick_params(axis='x', rotation=45)
+    # 优化x轴刻度显示：最小历元、200、400...最大历元
+    epochs = df_sorted['epoch'].values
+    min_epoch = int(np.min(epochs))
+    max_epoch = int(np.max(epochs))
+    tick_epochs = [min_epoch]
+    for ep in range(200, max_epoch, 200):
+        if ep > min_epoch:
+            tick_epochs.append(ep)
+    if max_epoch not in tick_epochs:
+        tick_epochs.append(max_epoch)
+    ax1.set_xticks(tick_epochs)
     
     # 2. 伪距残差分布直方图
     ax2 = axes[0, 1]
@@ -473,30 +516,56 @@ def visualize_global_residuals(df, output_dir):
     residual_max = np.max(np.abs(residuals))
     ax2.set_xlim(-residual_max, residual_max)
     
-    # 3. 伪距残差与高度角关系
+    # 3. 伪距残差与高度角关系 - 按卫星-频率组合用不同颜色绘制
     ax3 = axes[1, 0]
     
-    ax3.scatter(df['ele'], df['residual'], alpha=0.6, s=8, color='red')
+    df_copy = df.copy()
+    df_copy['prn_freq'] = df_copy['prn'] + ' ' + df_copy['frequency']
+    prn_freq_combinations_3 = df_copy['prn_freq'].unique()
+    
+    # 为每个组合分配颜色
+    colors_3 = plt.cm.tab20(np.linspace(0, 1, len(prn_freq_combinations_3)))
+    prn_freq_color_map_3 = dict(zip(prn_freq_combinations_3, colors_3))
+    
+    # 为每个卫星-频率组合绘制散点图
+    for prn_freq in prn_freq_combinations_3:
+        combo_data = df_copy[df_copy['prn_freq'] == prn_freq]
+        if len(combo_data) > 0:
+            ax3.scatter(combo_data['ele'], combo_data['residual'], 
+                       alpha=0.6, s=8, color=prn_freq_color_map_3[prn_freq])
+    
     ax3.set_xlabel('高度角 (°)')
     ax3.set_ylabel('伪距残差 (m)')
     ax3.set_title('伪距残差与高度角关系')
     ax3.grid(True, alpha=0.3)
     
     # 设置纵坐标范围正负平均
-    residual_max = np.max(np.abs(df['residual']))
+    residual_max = np.max(np.abs(df_copy['residual']))
     ax3.set_ylim(-residual_max, residual_max)
     
-    # 4. 伪距残差与信噪比关系
+    # 4. 伪距残差与信噪比关系 - 按卫星-频率组合用不同颜色绘制
     ax4 = axes[1, 1]
     
-    ax4.scatter(df['snr'], df['residual'], alpha=0.6, s=8, color='red')
+    prn_freq_combinations_4 = df_copy['prn_freq'].unique()
+    
+    # 为每个组合分配颜色
+    colors_4 = plt.cm.tab20(np.linspace(0, 1, len(prn_freq_combinations_4)))
+    prn_freq_color_map_4 = dict(zip(prn_freq_combinations_4, colors_4))
+    
+    # 为每个卫星-频率组合绘制散点图
+    for prn_freq in prn_freq_combinations_4:
+        combo_data = df_copy[df_copy['prn_freq'] == prn_freq]
+        if len(combo_data) > 0:
+            ax4.scatter(combo_data['snr'], combo_data['residual'], 
+                       alpha=0.6, s=8, color=prn_freq_color_map_4[prn_freq])
+    
     ax4.set_xlabel('信噪比 (dB-Hz)')
     ax4.set_ylabel('伪距残差 (m)')
     ax4.set_title('伪距残差与信噪比关系')
     ax4.grid(True, alpha=0.3)
     
     # 设置纵坐标范围正负平均
-    residual_max = np.max(np.abs(df['residual']))
+    residual_max = np.max(np.abs(df_copy['residual']))
     ax4.set_ylim(-residual_max, residual_max)
     
     plt.tight_layout()
@@ -508,6 +577,13 @@ def visualize_global_residuals(df, output_dir):
 
 
 def fit_and_visualize(subset, system, freq, output_dir):
+    # 在拟合前进行 3-sigma 剪裁，剔除极端离群点
+    initial_count = len(subset)
+    subset = sigma_clip(subset, sigma=3.0)
+    cleaned_count = len(subset)
+    if cleaned_count < initial_count:
+        print(f"[{system}-{freq}] 预处理：基于 3-sigma 准则剔除了 {initial_count - cleaned_count} 个离群观测值")
+
     y = subset['residual'].values
     x_elev = subset['elevation_rad'].values
     x_snr = subset['snr'].values
@@ -563,7 +639,7 @@ def fit_and_visualize(subset, system, freq, output_dir):
 
 def main():
     # 输入文件路径
-    input_file = 'results/K70128H/pseudorange_residuals.csv'
+    input_file = r'D:\code\matlab\raPPPid\raPPPid\RESULTS\GREC-K70\K041\new_gnss_log_2026_01_04_13_34_38-doppler smoothed\UU_06-Feb-2026_21h22m42s\residuals_info.txt'
 
     # 创建输出文件夹
     output_dir = os.path.join(os.path.dirname(input_file), 'Weighting')
@@ -574,7 +650,7 @@ def main():
     plt.rcParams['axes.unicode_minus'] = False  # 解决负号显示问题
 
     # 读取数据
-    df = pd.read_csv(input_file, parse_dates=['epoch'])
+    df = pd.read_csv(input_file)
     df['prn'] = df['prn'].astype(str)  # 确保PRN列为字符串类型
     df['system'] = df['prn'].str[0]  # 提取卫星系统信息
 
