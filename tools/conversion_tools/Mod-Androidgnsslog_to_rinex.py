@@ -47,9 +47,9 @@ CLIGHT = 299792458.0  # Speed of light (m/s)
 LeapSecond = 18  # Leap second for 2026
 
 # --- MODIFIED: Relaxed Thresholds ---
-MAXPRRUNCMPS = 100.0   # Maximum pseudorange rate (Doppler) uncertainty (Relaxed)
+MAXPRRUNCMPS = 10.0   # Maximum pseudorange rate (Doppler) uncertainty
 MAXTOWUNCNS = 500      # Maximum Tow uncertainty
-MAXADRUNCNS = 10       # Maximum ADR uncertainty (Relaxed)
+MAXADRUNCNS = 1       # Maximum ADR uncertainty
 # ------------------------------------
 
 MAX_SYS = 10
