@@ -505,6 +505,99 @@ class GNSSPlotter:
             return {'figure': None, 'path': path}
         return {'figure': fig, 'path': None}
 
+    def plot_ionofree_cmc(self, ionofree_results: Dict[str, Any], sat_id: str = None,
+                          save: bool = True, output_dir: Optional[str] = None) -> Dict[str, Any]:
+        """绘制无电离层组合CMC时间序列图.
+
+        若指定 sat_id，则只绘制该颗卫星；否则绘制所有卫星（每卫星一子图）。
+        返回 {'figure': fig|None, 'path': path|None, 'paths': [...]}
+        """
+        if sat_id is not None:
+            # 单颗卫星绘制
+            sat_data = ionofree_results.get(sat_id)
+            if not sat_data:
+                raise ValueError(f"无电离层组合CMC中无卫星 {sat_id} 的数据")
+            return self._plot_single_ionofree_cmc(sat_id, sat_data, save, output_dir)
+        else:
+            # 所有卫星分别绘制
+            paths = []
+            last_fig = None
+            for sid in sorted(ionofree_results.keys()):
+                out = self._plot_single_ionofree_cmc(sid, ionofree_results[sid], save, output_dir)
+                if out.get('path'):
+                    paths.append(out['path'])
+                if out.get('figure'):
+                    last_fig = out['figure']
+            return {'figure': last_fig, 'path': None, 'paths': paths}
+
+    def _plot_single_ionofree_cmc(self, result_key: str, sat_data: Dict[str, Any],
+                                   save: bool, output_dir: Optional[str]) -> Dict[str, Any]:
+        """绘制单颗卫星的无电离层组合CMC图."""
+        times = sat_data.get('times', [])
+        cmc_if = sat_data.get('cmc_if', [])
+        freq_pair = sat_data.get('freq_pair', ('?', '?'))
+        real_sat_id = sat_data.get('sat_id', result_key)
+        alpha = sat_data.get('alpha', 0)
+        beta = sat_data.get('beta', 0)
+        noise_factor = sat_data.get('noise_factor', 0)
+
+        if not cmc_if:
+            raise ValueError(f"卫星 {real_sat_id} 的无电离层组合CMC数据为空")
+
+        # 生成历元索引 (1-based)
+        epochs = list(range(1, len(cmc_if) + 1))
+
+        fig, ax = plt.subplots(figsize=(12, 5))
+
+        line, = ax.plot(epochs, cmc_if, marker='o', markersize=2, linestyle='-',
+                        linewidth=0.8, color='#2196F3', alpha=0.8)
+
+        # 标题和标签
+        f1_name, f2_name = freq_pair
+        ax.set_title(f"Ionosphere-Free CMC  {real_sat_id}  ({f1_name} + {f2_name})", fontsize=13, fontweight='bold')
+        ax.set_xlabel('Epoch', fontsize=11)
+        ax.set_ylabel('CMC_IF (m)', fontsize=11)
+        ax.grid(True, alpha=0.3)
+
+        # 统计信息
+        import statistics as _stats
+        mean_val = _stats.mean(cmc_if)
+        std_val = _stats.stdev(cmc_if) if len(cmc_if) > 1 else 0.0
+        min_val = min(cmc_if)
+        max_val = max(cmc_if)
+
+        stats_text = (
+            f"α = {alpha:.4f},  β = {beta:.4f}\n"
+            f"噪声放大: ×{noise_factor:.2f}\n"
+            f"均值: {mean_val:.4f} m\n"
+            f"标准差: {std_val:.4f} m\n"
+            f"范围: [{min_val:.4f}, {max_val:.4f}] m\n"
+            f"历元数: {len(cmc_if)}"
+        )
+        ax.text(0.02, 0.98, stats_text, transform=ax.transAxes, fontsize=9,
+                verticalalignment='top',
+                bbox=dict(boxstyle='round', facecolor='lightyellow', alpha=0.9))
+
+        # 均值参考线
+        ax.axhline(y=mean_val, color='red', linestyle='--', linewidth=0.8, alpha=0.6, label=f'Mean={mean_val:.4f} m')
+        ax.legend(loc='upper right', fontsize=9)
+
+        plt.tight_layout()
+
+        # 交互式数据点显示
+        if MPLCURSORS_AVAILABLE and not save:
+            scatter = ax.scatter(epochs, cmc_if, s=50, alpha=0, picker=True)
+            cursor = mplcursors.cursor(scatter)
+            cursor.connect("add", lambda sel: sel.annotation.set(
+                text=f'Epoch: {sel.target[0]:.0f}\nCMC_IF: {sel.target[1]:.4f} m\n\n点击后按←/→键',
+                bbox=dict(boxstyle='round,pad=0.5', fc='yellow', alpha=0.8)))
+
+        if save:
+            safe_key = result_key.replace(':', '_')
+            path = self._save_fig(fig, f"ionofree_cmc_{safe_key}", output_dir)
+            return {'figure': None, 'path': path}
+        return {'figure': fig, 'path': None}
+
     def save_all_plots(self, figures: Sequence[Figure], output_dir: str) -> Dict[str, str]:
         results = {}
         out_dir = self._ensure_output_dir(output_dir)

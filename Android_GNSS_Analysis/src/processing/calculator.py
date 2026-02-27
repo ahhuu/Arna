@@ -1,5 +1,6 @@
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Tuple
 import statistics
+import math
 from src.core.config import GNSS_FREQUENCIES, SPEED_OF_LIGHT
 from src.processing.advanced_algo import CoreAlgorithmProcessor
 
@@ -332,6 +333,162 @@ class MetricCalculator:
                 cmc_results[sat_id] = freq_out
 
         return cmc_results
+
+    # ---- IF组合频率对配置 ----
+    # 各系统用于无电离层组合的频率对列表: [(高频, 低频), ...]
+    # 一个系统可有多个频率对，如Galileo同时支持L1C+L5Q和L1C+L7Q
+    IF_FREQ_PAIRS = {
+        'G': [('L1C', 'L5Q')],
+        'E': [('L1C', 'L5Q'), ('L1C', 'L7Q')],
+        'C': [('L1P', 'L5P')],
+        'J': [('L1C', 'L5Q')],
+    }
+
+    @staticmethod
+    def _ionofree_coefficients(f1_hz: float, f2_hz: float) -> Tuple[float, float]:
+        """计算无电离层组合系数 alpha, beta.
+
+        alpha = f1^2 / (f1^2 - f2^2),  beta = -f2^2 / (f1^2 - f2^2)
+        满足 alpha + beta = 1, 且消除一阶电离层延迟.
+        """
+        f1sq = f1_hz ** 2
+        f2sq = f2_hz ** 2
+        denom = f1sq - f2sq
+        if abs(denom) < 1e-6:
+            raise ValueError(f"两个频率太接近, 无法组合: f1={f1_hz}, f2={f2_hz}")
+        alpha = f1sq / denom
+        beta = -f2sq / denom
+        return alpha, beta
+
+    def calculate_ionofree_cmc(self, data: Dict[str, Any], source_key: str = 'code_phase_differences',
+                                freq_pair: Tuple[str, str] = None) -> Dict[str, Any]:
+        """计算无电离层组合CMC (Ionosphere-Free CMC).
+
+        对每颗卫星，将两个频率的CMC按无电离层组合系数线性组合，消除一阶电离层延迟。
+        支持两种输入源:
+          - 'code_phase_differences': 手机CMC数据 (来自 calculate_code_phase_differences)
+          - 'receiver_cmc': 接收机CMC数据 (来自 calculate_receiver_cmc)
+
+        当一个系统配置了多个频率对（如Galileo的L1C+L5Q和L1C+L7Q）时，
+        结果key使用 "sat_id:f1+f2" 格式以区分不同组合。
+        若该系统仅有一个频率对，key仍为 "sat_id"。
+
+        参数:
+            data: 包含 CMC 数据的字典
+            source_key: 数据来源键名
+            freq_pair: 可选，指定使用的频率对 (f1_name, f2_name)，
+                       如 ('L1C', 'L5Q')。指定后所有系统统一使用此频率对，
+                       忽略 IF_FREQ_PAIRS 配置。为 None 时使用默认配置。
+
+        返回:
+            {key: {'times': [...], 'cmc_if': [...], 'freq_pair': (f1, f2),
+                   'sat_id': str, 'alpha': float, 'beta': float, 'noise_factor': float}}
+        """
+        source = data.get(source_key, {})
+        if not source:
+            return {}
+
+        ionofree_results: Dict[str, Any] = {}
+
+        for sat_id, freq_data in source.items():
+            system = sat_id[0] if sat_id else ''
+
+            # 确定使用的频率对列表
+            if freq_pair is not None:
+                # 用户指定了频率对，直接使用（仅一个）
+                freq_pairs_to_use = [freq_pair]
+            else:
+                freq_pairs_to_use = self.IF_FREQ_PAIRS.get(system)
+                if freq_pairs_to_use is None:
+                    continue  # 该系统不支持IF组合 (如GLONASS)
+
+            multiple = len(freq_pairs_to_use) > 1
+
+            for f1_name, f2_name in freq_pairs_to_use:
+                # 获取两个频率的数据
+                d1 = freq_data.get(f1_name)
+                d2 = freq_data.get(f2_name)
+                if d1 is None or d2 is None:
+                    continue  # 缺少某个频率
+
+                # 根据source_key确定值字段名
+                if source_key == 'code_phase_differences':
+                    val_key = 'code_phase_diff'
+                elif source_key == 'receiver_cmc':
+                    val_key = 'cmc_m'
+                else:
+                    val_key = 'code_phase_diff'
+
+                times1 = d1.get('times', [])
+                vals1 = d1.get(val_key, [])
+                times2 = d2.get('times', [])
+                vals2 = d2.get(val_key, [])
+
+                if not times1 or not times2:
+                    continue
+
+                # 获取频率值并计算IF系数
+                sys_freqs = GNSS_FREQUENCIES.get(system, {})
+                f1_hz = sys_freqs.get(f1_name)
+                f2_hz = sys_freqs.get(f2_name)
+                if f1_hz is None or f2_hz is None:
+                    continue
+
+                alpha, beta = self._ionofree_coefficients(f1_hz, f2_hz)
+                noise_factor = math.sqrt(alpha ** 2 + beta ** 2)
+
+                # 数据对齐: 按时间匹配两个频率的历元
+                # 构建f2的时间索引 (支持datetime和数值型时间)
+                time2_idx: Dict[Any, int] = {}
+                for j, t in enumerate(times2):
+                    time2_idx[t] = j
+
+                out_times = []
+                out_cmc_if = []
+
+                for i, t1 in enumerate(times1):
+                    v1 = vals1[i]
+                    if v1 is None:
+                        continue
+
+                    # 精确时间匹配
+                    j = time2_idx.get(t1)
+
+                    # 如果精确匹配失败且时间是datetime类型，尝试容差匹配
+                    if j is None and hasattr(t1, 'total_seconds'):
+                        for t2_candidate, idx in time2_idx.items():
+                            try:
+                                if abs((t1 - t2_candidate).total_seconds()) < 0.1:
+                                    j = idx
+                                    break
+                            except Exception:
+                                continue
+
+                    if j is None:
+                        continue
+
+                    v2 = vals2[j]
+                    if v2 is None:
+                        continue
+
+                    cmc_if = alpha * v1 + beta * v2
+                    out_times.append(t1)
+                    out_cmc_if.append(cmc_if)
+
+                if out_cmc_if:
+                    # 多频率对时用 "sat_id:f1+f2" 作key，单频率对直接用 sat_id
+                    result_key = f"{sat_id}:{f1_name}+{f2_name}" if multiple else sat_id
+                    ionofree_results[result_key] = {
+                        'times': out_times,
+                        'cmc_if': out_cmc_if,
+                        'freq_pair': (f1_name, f2_name),
+                        'sat_id': sat_id,
+                        'alpha': alpha,
+                        'beta': beta,
+                        'noise_factor': noise_factor,
+                    }
+
+        return ionofree_results
 
     def calculate_epoch_double_diffs(self, data: Dict[str, Any]) -> Dict[str, Any]:
         """Compute epoch-based double differences (port of analyzer.calculate_epoch_double_differences)."""

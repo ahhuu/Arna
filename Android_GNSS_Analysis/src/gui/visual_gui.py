@@ -38,6 +38,22 @@ class VisualizationWindow:
     def plot_isb(self, save: bool = True, output_dir: Optional[str] = None):
         return self.plotter.plot_isb_analysis(self.context.results.get('isb_analysis', {}), save=save, output_dir=output_dir)
 
+    def plot_ionofree_cmc(self, sat_id: str = None, save: bool = True, output_dir: Optional[str] = None):
+        """Plot ionosphere-free combination CMC for one or all satellites."""
+        ionofree = self.context.results.get('ionofree_cmc', {})
+        if not ionofree:
+            mc = MetricCalculator()
+            if 'code_phase_differences' not in self.context.results:
+                inputs = {
+                    'observations_meters': self.context.observations_meters,
+                    'frequencies': self.context.frequencies,
+                    'wavelengths': self.context.wavelengths
+                }
+                self.context.results['code_phase_differences'] = mc.calculate_code_phase_differences(inputs)
+            ionofree = mc.calculate_ionofree_cmc({'code_phase_differences': self.context.results['code_phase_differences']})
+            self.context.results['ionofree_cmc'] = ionofree
+        return self.plotter.plot_ionofree_cmc(ionofree, sat_id=sat_id, save=save, output_dir=output_dir)
+
     def plot_inter_freq_bias(self, freq1: str, freq2: str, constellation: Optional[str] = None, 
                             save: bool = True, output_dir: Optional[str] = None):
         """Plot inter-frequency bias analysis with ISD correction."""
@@ -96,6 +112,7 @@ class VisualizationWindow:
             ('历元间双差', 'double_differences'),
             ('ISB分析', 'isb_analysis'),
             ('接收机CMC', 'receiver_cmc'),
+            ('无电离层组合CMC', 'ionofree_cmc'),
             ('周跳探测分析 (MW & GF)', 'cycle_slip_detection'),
             ('伪距频间偏差与ISD验证', 'inter_freq_bias')
         ]
@@ -119,17 +136,46 @@ class VisualizationWindow:
         ttk.Label(freq_pair_frame, text='频率组合:').pack(side=tk.LEFT)
         freq_pair_var = tk.StringVar(value='自动选择')
         freq_pair_combo = ttk.Combobox(freq_pair_frame, textvariable=freq_pair_var, width=20, state="readonly")
-        # 从config中生成频率对列表
+        # 从config中生成频率对列表（用于周跳探测等）
         from src.core.config import GNSS_FREQUENCIES
-        freq_pair_options = ['自动选择']
+        cycleslip_freq_options = ['自动选择']
         for system, freqs in GNSS_FREQUENCIES.items():
             freq_list = list(freqs.keys())
             if len(freq_list) >= 2:
-                freq_pair_options.append(f"{freq_list[0]}+{freq_list[1]}")
-        freq_pair_combo['values'] = freq_pair_options
-        # 确保默认值与下拉项一致
-        freq_pair_var.set(freq_pair_options[0])
+                cycleslip_freq_options.append(f"{freq_list[0]}+{freq_list[1]}")
+        # 从IF_FREQ_PAIRS生成无电离层组合专用频率对选项
+        from src.processing.calculator import MetricCalculator as _MC
+
+        def _get_ionofree_options_for_system(sys_code: str = ''):
+            """根据卫星系统返回IF组合频率对选项，无系统时返回所有系统的去重合集"""
+            opts = ['自动选择']
+            if sys_code and sys_code in _MC.IF_FREQ_PAIRS:
+                for f1, f2 in _MC.IF_FREQ_PAIRS[sys_code]:
+                    opts.append(f"{f1}+{f2}")
+            else:
+                seen = set()
+                for pairs in _MC.IF_FREQ_PAIRS.values():
+                    for f1, f2 in pairs:
+                        key = f"{f1}+{f2}"
+                        if key not in seen:
+                            seen.add(key)
+                            opts.append(key)
+            return opts
+
+        freq_pair_combo['values'] = cycleslip_freq_options
+        freq_pair_var.set(cycleslip_freq_options[0])
         freq_pair_combo.pack(side=tk.LEFT, padx=5)
+
+        # 切换图表类型时动态更新频率组合下拉框选项
+        def _on_chart_type_changed(*_args):
+            if chart_var.get() == 'ionofree_cmc':
+                sys_code = sat_system_var.get() or ''
+                opts = _get_ionofree_options_for_system(sys_code)
+                freq_pair_combo['values'] = opts
+            else:
+                freq_pair_combo['values'] = cycleslip_freq_options
+            freq_pair_var.set('自动选择')
+        chart_var.trace_add('write', _on_chart_type_changed)
         
         # 周跳探测阈值设置
         threshold_frame = ttk.LabelFrame(chart_frame, text='周跳阈值设置', padding=5)
@@ -383,13 +429,17 @@ class VisualizationWindow:
                     freq_var.set(freqs[0])
 
             # 更新频率组合下拉，按系统提供推荐组合
-            try:
-                pair_opts = get_freq_pair_options_for_system(sys)
-                freq_pair_combo['values'] = pair_opts
-                freq_pair_var.set(pair_opts[0])
-            except Exception:
-                # 保持原有选项不变
-                pass
+            if chart_var.get() == 'ionofree_cmc':
+                opts = _get_ionofree_options_for_system(sys)
+                freq_pair_combo['values'] = opts
+                freq_pair_var.set(opts[0])
+            else:
+                try:
+                    pair_opts = get_freq_pair_options_for_system(sys)
+                    freq_pair_combo['values'] = pair_opts
+                    freq_pair_var.set(pair_opts[0])
+                except Exception:
+                    pass
 
         sat_system_var.trace('w', on_system_change)
         
@@ -398,14 +448,19 @@ class VisualizationWindow:
              if not prn: return
              target = self.context.observations_meters if self.context.observations_meters else self.context.receiver_observations
              if target and prn in target:
-                 # 当 PRN 改变时，同步更新频率组合选项（确保与所选系统一致）
+                 # 当 PRN 改变时，同步更新频率组合选项
                  sys_code = prn[0] if prn else ''
-                 try:
-                     pair_opts = get_freq_pair_options_for_system(sys_code)
-                     freq_pair_combo['values'] = pair_opts
-                     freq_pair_var.set(pair_opts[0])
-                 except Exception:
-                     pass
+                 if chart_var.get() == 'ionofree_cmc':
+                     opts = _get_ionofree_options_for_system(sys_code)
+                     freq_pair_combo['values'] = opts
+                     freq_pair_var.set(opts[0])
+                 else:
+                     try:
+                         pair_opts = get_freq_pair_options_for_system(sys_code)
+                         freq_pair_combo['values'] = pair_opts
+                         freq_pair_var.set(pair_opts[0])
+                     except Exception:
+                         pass
                  freqs = sorted(list(target[prn].keys()))
                  freq_combo['values'] = freqs
                  # if current freq not in list, select first
@@ -466,6 +521,50 @@ class VisualizationWindow:
                             'receiver_wavelengths': self.context.results.get('receiver_wavelengths')
                         })
                     out = self.plotter.plot_receiver_cmc(self.context.results['receiver_cmc'], save=False)
+
+                # Ionosphere-Free CMC Special Case
+                elif chart_type == 'ionofree_cmc':
+                    if not self.context.observations_meters:
+                        messagebox.showerror('错误', '请先加载手机RINEX文件')
+                        return
+                    # 确保CMC已计算
+                    mc = MetricCalculator()
+                    if 'code_phase_differences' not in self.context.results:
+                        inputs = {
+                            'observations_meters': self.context.observations_meters,
+                            'epochs': self.context.results.get('epochs', []),
+                            'frequencies': self.context.frequencies,
+                            'wavelengths': self.context.wavelengths
+                        }
+                        self.context.results['code_phase_differences'] = mc.calculate_code_phase_differences(inputs)
+                    # 解析GUI频率组合选择
+                    freq_pair_selection = freq_pair_var.get()
+                    selected_freq_pair = None
+                    if freq_pair_selection and freq_pair_selection != '自动选择':
+                        parts = [p.strip() for p in freq_pair_selection.split('+') if p.strip()]
+                        if len(parts) == 2:
+                            selected_freq_pair = tuple(parts)
+                    # 用频率对作为缓存key，不同频率对不共享缓存
+                    cache_key = f'ionofree_cmc_{freq_pair_selection}'
+                    if cache_key not in self.context.results:
+                        self.context.results[cache_key] = mc.calculate_ionofree_cmc(
+                            {'code_phase_differences': self.context.results['code_phase_differences']},
+                            freq_pair=selected_freq_pair)
+                    ionofree = self.context.results[cache_key]
+                    if not ionofree:
+                        messagebox.showwarning('警告', '无法计算无电离层组合CMC（需要双频数据，请检查频率组合选择）')
+                        return
+                    sat = sat_prn_var.get()
+                    if sat and sat in ionofree:
+                        out = self.plotter.plot_ionofree_cmc(ionofree, sat_id=sat, save=False)
+                    else:
+                        # 支持多频率对key格式 (如 "E05:L1C+L5Q")，按sat_id前缀匹配
+                        matched_keys = [k for k in ionofree if k == sat or k.startswith(sat + ':')]
+                        if matched_keys:
+                            out = self.plotter.plot_ionofree_cmc(ionofree, sat_id=matched_keys[0], save=False)
+                        else:
+                            first_sat = sorted(ionofree.keys())[0]
+                            out = self.plotter.plot_ionofree_cmc(ionofree, sat_id=first_sat, save=False)
 
                 # ISB Special Case
                 elif chart_type == 'isb_analysis':
@@ -744,6 +843,7 @@ class VisualizationWindow:
                  'double_differences': 'Double_differences', 
                  'isb_analysis': 'ISB_analysis',
                  'receiver_cmc': 'Receiver_CMC',
+                 'ionofree_cmc': 'Ionofree_CMC',
                  'cycle_slip_detection': 'Cycle_slips',
                  'inter_freq_bias': 'Inter_freq_bias'
              }
@@ -822,12 +922,41 @@ class VisualizationWindow:
                      messagebox.showinfo('完成', f'已保存 {count} 张周跳探测图表\n目录: {cycleslip_dir}')
                      return
                  
-                 pre_calculate_metrics()
-                 sats = sorted(self.context.observations_meters.keys())
                  count = 0
                  
+                 # Ionosphere-free CMC batch save
+                 if chart_type == 'ionofree_cmc':
+                      mc = MetricCalculator()
+                      if 'code_phase_differences' not in self.context.results:
+                          inputs = {
+                              'observations_meters': self.context.observations_meters,
+                              'epochs': self.context.results.get('epochs', []),
+                              'frequencies': self.context.frequencies,
+                              'wavelengths': self.context.wavelengths
+                          }
+                          self.context.results['code_phase_differences'] = mc.calculate_code_phase_differences(inputs)
+                      # 解析GUI频率组合选择
+                      freq_pair_selection = freq_pair_var.get()
+                      selected_freq_pair = None
+                      if freq_pair_selection and freq_pair_selection != '自动选择':
+                          parts = [p.strip() for p in freq_pair_selection.split('+') if p.strip()]
+                          if len(parts) == 2:
+                              selected_freq_pair = tuple(parts)
+                      cache_key = f'ionofree_cmc_{freq_pair_selection}'
+                      if cache_key not in self.context.results:
+                          self.context.results[cache_key] = mc.calculate_ionofree_cmc(
+                              {'code_phase_differences': self.context.results['code_phase_differences']},
+                              freq_pair=selected_freq_pair)
+                      ionofree = self.context.results.get(cache_key, {})
+                      for sid in sorted(ionofree.keys()):
+                          try:
+                              self.plotter.plot_ionofree_cmc(ionofree, sat_id=sid, save=True, output_dir=target_dir)
+                              count += 1
+                          except:
+                              continue
+
                  # For ISB, it's one plot total usually, or per constellation?
-                 if chart_type == 'isb_analysis':
+                 elif chart_type == 'isb_analysis':
                       # We need ISB data
                       if 'isb_analysis' not in self.context.results:
                             messagebox.showerror('错误', '请先进行ISB分析或加载数据')
@@ -835,7 +964,88 @@ class VisualizationWindow:
                       # Plot
                       self.plotter.plot_isb_analysis(self.context.results['isb_analysis'], save=True, output_dir=target_dir)
                       count = 1
+
+                 # 频间伪距单差分析 - 批量保存所有可能的组合
+                 elif chart_type == 'inter_freq_bias':
+                      try:
+                          from src.processing.inter_freq_bias import InterFrequencyBiasAnalyzer
+                          from src.core.config import GNSS_FREQUENCIES
+                          from itertools import combinations
+
+                          analyzer = InterFrequencyBiasAnalyzer()
+
+                          # 识别观测数据中存在的星座系统
+                          available_systems = set()
+                          for sat_id in self.context.observations_meters.keys():
+                              available_systems.add(sat_id[0])  # 第一个字符是系统标识
+
+                          status_var.set(f'正在分析频间偏差，发现 {len(available_systems)} 个星座系统...')
+                          top.update_idletasks()
+
+                          # 遍历每个星座系统
+                          for system in sorted(available_systems):
+                              if system not in GNSS_FREQUENCIES:
+                                  continue
+
+                              # 获取该系统的所有频率
+                              freq_keys = list(GNSS_FREQUENCIES[system].keys())
+                              if len(freq_keys) < 2:
+                                  continue  # 需要至少2个频率才能做频间偏差分析
+
+                              # 生成所有可能的频率对组合
+                              freq_pairs = list(combinations(freq_keys, 2))
+
+                              status_var.set(f'正在分析 {system} 系统，共 {len(freq_pairs)} 个频率组合...')
+                              top.update_idletasks()
+
+                              # 对每个频率对进行分析和保存
+                              for freq1_name, freq2_name in freq_pairs:
+                                  try:
+                                      # 执行分析（仅针对当前星座系统）
+                                      analysis_result = analyzer.analyze_inter_freq_bias(
+                                          self.context.observations_meters,
+                                          freq1_name,
+                                          freq2_name,
+                                          constellation=system
+                                      )
+
+                                      # 检查是否有有效数据
+                                      if 'error' in analysis_result:
+                                          continue  # 跳过无数据的组合
+
+                                      raw_diffs = analysis_result.get('raw_diffs', {})
+                                      if not raw_diffs:
+                                          continue  # 没有数据，跳过
+
+                                      # 保存图表
+                                      self.plotter.plot_inter_freq_bias(
+                                          analysis_result,
+                                          save=True,
+                                          output_dir=target_dir
+                                      )
+                                      count += 1
+
+                                      status_var.set(f'已保存 {count} 张: {system} {freq1_name}-{freq2_name}')
+                                      top.update_idletasks()
+
+                                  except Exception as e:
+                                      # 单个组合失败不影响其他组合
+                                      print(f"警告: {system} {freq1_name}-{freq2_name} 分析失败: {e}")
+                                      continue
+
+                          if count == 0:
+                              messagebox.showwarning('警告', '未找到有效的频率组合数据')
+                              return
+
+                      except Exception as e:
+                          import traceback
+                          traceback.print_exc()
+                          messagebox.showerror('错误', f'批量频间偏差分析失败: {e}')
+                          return
+
                  else:
+                     pre_calculate_metrics()
+                     sats = sorted(self.context.observations_meters.keys())
                      for sat in sats:
                          freqs = list(self.context.observations_meters[sat].keys())
                          
