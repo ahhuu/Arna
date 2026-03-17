@@ -6,6 +6,8 @@ import matplotlib.pyplot as plt
 from scipy.optimize import curve_fit, least_squares
 import os
 import sys
+import tkinter as tk
+from tkinter import filedialog, messagebox
 
 
 # 定义模型函数
@@ -637,10 +639,7 @@ def fit_and_visualize(subset, system, freq, output_dir):
     return result
 
 
-def main():
-    # 输入文件路径
-    input_file = r'D:\code\matlab\raPPPid\raPPPid\RESULTS\GREC-K70\K041\new_gnss_log_2026_01_04_13_34_38-doppler smoothed\UU_06-Feb-2026_21h22m42s\residuals_info.txt'
-
+def run_for_file(input_file):
     # 创建输出文件夹
     output_dir = os.path.join(os.path.dirname(input_file), 'Weighting')
     os.makedirs(output_dir, exist_ok=True)
@@ -698,6 +697,50 @@ def main():
         results_df.to_csv(results_file, index=False)
 
     print(f"所有拟合已完成，结果已保存到 {output_dir}")
+
+
+def main():
+    root = tk.Tk()
+    root.withdraw()
+    root.attributes('-topmost', True)
+
+    input_files = filedialog.askopenfilenames(
+        title='选择 residuals_info 文件（可多选）',
+        filetypes=[('Text files', '*.txt *.csv'), ('All files', '*.*')],
+        parent=root,
+    )
+
+    if not input_files:
+        root.destroy()
+        return
+
+    success = 0
+    failed = []
+    for input_file in input_files:
+        try:
+            print(f"开始处理: {input_file}")
+            run_for_file(input_file)
+            success += 1
+        except Exception as exc:
+            failed.append(f"{os.path.basename(input_file)}: {exc}")
+
+    if failed:
+        detail = "\n".join(failed[:8])
+        if len(failed) > 8:
+            detail += f"\n... 另有 {len(failed) - 8} 个文件失败"
+        messagebox.showwarning(
+            "SNR 权重建模完成（部分失败）",
+            f"成功: {success}\n失败: {len(failed)}\n\n{detail}",
+            parent=root,
+        )
+    else:
+        messagebox.showinfo(
+            "SNR 权重建模完成",
+            f"已成功处理 {success} 个文件。\n结果位于各输入文件同级目录下的 Weighting 文件夹。",
+            parent=root,
+        )
+
+    root.destroy()
 
 
 if __name__ == "__main__":

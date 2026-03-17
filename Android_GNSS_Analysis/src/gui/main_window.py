@@ -2,6 +2,7 @@ from src.core.context import AnalysisContext
 from .process_gui import PreprocessingWindow
 from .visual_gui import VisualizationWindow
 from .report_gui import ReportWindow
+from .tools_launcher import ToolLauncher
 
 
 def main():
@@ -18,10 +19,11 @@ def main():
 
     root = tk.Tk()
     root.title("GNSS数据分析器")
-    root.geometry('950x700')
+    root.geometry('950x900')
     root.resizable(True, True)
 
     ctx = AnalysisContext()
+    launcher = ToolLauncher()
 
     # Create windows with context
     pp = PreprocessingWindow(ctx)
@@ -46,6 +48,49 @@ def main():
     report_menu = tk.Menu(menubar, tearoff=0)
     menubar.add_cascade(label="报告", menu=report_menu)
     report_menu.add_command(label="生成分析报告", command=lambda: rr.show(root))
+
+    def _launch_tool(rel_parts):
+        script = launcher.script_path(*rel_parts)
+        ok, msg = launcher.launch(script)
+        if not ok:
+            messagebox.showerror("工具启动失败", msg)
+
+    # 工具菜单
+    tools_menu = tk.Menu(menubar, tearoff=0)
+    menubar.add_cascade(label="工具", menu=tools_menu)
+
+    analysis_menu = tk.Menu(tools_menu, tearoff=0)
+    tools_menu.add_cascade(label="分析工具", menu=analysis_menu)
+    analysis_menu.add_command(
+        label="API 不确定度分析",
+        command=lambda: _launch_tool(("analysis_tools", "Api_Analysis_Tool.py")),
+    )
+    analysis_menu.add_command(
+        label="SNR 权重建模",
+        command=lambda: _launch_tool(("analysis_tools", "SNR_Weighting.py")),
+    )
+
+    conversion_menu = tk.Menu(tools_menu, tearoff=0)
+    tools_menu.add_cascade(label="格式转换工具", menu=conversion_menu)
+    conversion_menu.add_command(
+        label="Android 原始数据转RINEX",
+        command=lambda: _launch_tool(("conversion_tools", "Mod-Androidgnsslog_to_rinex.py")),
+    )
+    conversion_menu.add_command(
+        label="随机模型表达式转换",
+        command=lambda: _launch_tool(("conversion_tools", "ModelConverter.py")),
+    )
+
+    coord_menu = tk.Menu(tools_menu, tearoff=0)
+    tools_menu.add_cascade(label="坐标工具", menu=coord_menu)
+    coord_menu.add_command(
+        label="批量 XYZ 写入 Coords",
+        command=lambda: _launch_tool(("coordinate_tools", "batch_xyz_to_coords.py")),
+    )
+    coord_menu.add_command(
+        label="坐标转换工具",
+        command=lambda: _launch_tool(("coordinate_tools", "Transform_Coordinates.py")),
+    )
 
     # 主界面
     main_frame = ttk.Frame(root, padding="20")
@@ -81,6 +126,45 @@ def main():
     ttk.Button(quick_btn_frame, text="生成报告",
                command=lambda: rr.show(root)).pack(side=tk.LEFT, padx=10)
 
+    tools_quick_frame = ttk.LabelFrame(quick_frame, text="常用工具", padding="10")
+    tools_quick_frame.pack(fill=tk.X, pady=(15, 0))
+
+    row1 = ttk.Frame(tools_quick_frame)
+    row1.pack(pady=4)
+    ttk.Button(
+        row1,
+        text="API 不确定度分析",
+        command=lambda: _launch_tool(("analysis_tools", "Api_Analysis_Tool.py")),
+    ).pack(side=tk.LEFT, padx=6)
+    ttk.Button(
+        row1,
+        text="SNR 权重建模",
+        command=lambda: _launch_tool(("analysis_tools", "SNR_Weighting.py")),
+    ).pack(side=tk.LEFT, padx=6)
+    ttk.Button(
+        row1,
+        text="Android 原始数据转RINEX",
+        command=lambda: _launch_tool(("conversion_tools", "Mod-Androidgnsslog_to_rinex.py")),
+    ).pack(side=tk.LEFT, padx=6)
+
+    row2 = ttk.Frame(tools_quick_frame)
+    row2.pack(pady=4)
+    ttk.Button(
+        row2,
+        text="模型表达式转换",
+        command=lambda: _launch_tool(("conversion_tools", "ModelConverter.py")),
+    ).pack(side=tk.LEFT, padx=6)
+    ttk.Button(
+        row2,
+        text="批量 XYZ 写入 Coords",
+        command=lambda: _launch_tool(("coordinate_tools", "batch_xyz_to_coords.py")),
+    ).pack(side=tk.LEFT, padx=6)
+    ttk.Button(
+        row2,
+        text="坐标转换工具",
+        command=lambda: _launch_tool(("coordinate_tools", "Transform_Coordinates.py")),
+    ).pack(side=tk.LEFT, padx=6)
+
     # 版权信息
     copyright_frame = ttk.Frame(main_frame)
     copyright_frame.pack(fill=tk.X, pady=(20, 10))
@@ -100,7 +184,7 @@ def main():
     root.protocol('WM_DELETE_WINDOW', on_closing)
     
     # 居中显示
-    center_window(root, 750, 500)
+    center_window(root, 860, 600)
 
     root.mainloop()
 

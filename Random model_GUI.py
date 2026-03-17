@@ -13,15 +13,25 @@ import sys
 import importlib.util
 from pathlib import Path
 
+
+def _resolve_tools_root():
+    base = Path(__file__).parent
+    new_root = base / 'Android_GNSS_Analysis' / 'tools'
+    old_root = base / 'tools'
+    return new_root if new_root.exists() else old_root
+
+
+TOOLS_ROOT = _resolve_tools_root()
+
 # 动态导入 Pseudorange_Residuals
-pr_path = Path(__file__).parent / 'tools' / 'analysis_tools' / 'Pseudorange_Residuals.py'
+pr_path = TOOLS_ROOT / 'analysis_tools' / 'Pseudorange_Residuals.py'
 pr_spec = importlib.util.spec_from_file_location("Pseudorange_Residuals", pr_path)
 Pseudorange_Residuals = importlib.util.module_from_spec(pr_spec)
 sys.modules["Pseudorange_Residuals"] = Pseudorange_Residuals
 pr_spec.loader.exec_module(Pseudorange_Residuals)
 
 # 动态导入 SNR_Weighting
-snr_path = Path(__file__).parent / 'tools' / 'analysis_tools' / 'SNR_Weighting.py'
+snr_path = TOOLS_ROOT / 'analysis_tools' / 'SNR_Weighting.py'
 snr_spec = importlib.util.spec_from_file_location("SNR_Weighting", snr_path)
 SNR_Weighting = importlib.util.module_from_spec(snr_spec)
 sys.modules["SNR_Weighting"] = SNR_Weighting
