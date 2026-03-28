@@ -88,8 +88,12 @@ def main():
         command=lambda: _launch_tool(("coordinate_tools", "batch_xyz_to_coords.py")),
     )
     coord_menu.add_command(
-        label="坐标转换工具",
-        command=lambda: _launch_tool(("coordinate_tools", "Transform_Coordinates.py")),
+        label="静态坐标转换",
+        command=lambda: _launch_tool(("coordinate_tools", "Static_Coordinate_Transformation.py")),
+    )
+    coord_menu.add_command(
+        label="动态坐标转换",
+        command=lambda: _launch_tool(("coordinate_tools", "Dynamic_Coordinate_Transformation.py")),
     )
 
     # 主界面
@@ -161,8 +165,13 @@ def main():
     ).pack(side=tk.LEFT, padx=6)
     ttk.Button(
         row2,
-        text="坐标转换工具",
-        command=lambda: _launch_tool(("coordinate_tools", "Transform_Coordinates.py")),
+        text="静态坐标转换",
+        command=lambda: _launch_tool(("coordinate_tools", "Static_Coordinate_Transformation.py")),
+    ).pack(side=tk.LEFT, padx=6)
+    ttk.Button(
+        row2,
+        text="动态坐标转换",
+        command=lambda: _launch_tool(("coordinate_tools", "Dynamic_Coordinate_Transformation.py")),
     ).pack(side=tk.LEFT, padx=6)
 
     # 版权信息
