@@ -1,6 +1,7 @@
 import math
 import re
 import os
+from datetime import datetime, timezone, timedelta
 import tkinter as tk
 from tkinter import filedialog
 
@@ -18,6 +19,9 @@ LEVER_ARMS = {
     'Phone_F_Front': {'dx': 0.0, 'dy': 0.075, 'dz': 0.09},
     'Phone_A_Right': {'dx': 0.075, 'dy': 0.0, 'dz': 0.09}
 }
+
+# GPS 与 UTC 的闰秒差（截至当前通常为 18s）
+GPS_UTC_LEAP_SECONDS = 18
 
 
 # =================================================================
@@ -82,6 +86,16 @@ def apply_lever_arm(base_X, base_Y, base_Z, lat_deg, lon_deg, heading_rad, offse
     return base_X + dX, base_Y + dY, base_Z + dZ
 
 
+def utc_to_gps_week_sow(utc_dt):
+    """UTC datetime -> (GPS week, seconds of week)"""
+    gps_epoch = datetime(1980, 1, 6, 0, 0, 0, tzinfo=timezone.utc)
+    gps_dt = utc_dt + timedelta(seconds=GPS_UTC_LEAP_SECONDS)
+    delta_sec = (gps_dt - gps_epoch).total_seconds()
+    gps_week = int(delta_sec // 604800)
+    sow = delta_sec - gps_week * 604800
+    return gps_week, sow
+
+
 # =================================================================
 # 3. 主程序逻辑
 # =================================================================
@@ -116,6 +130,16 @@ def main():
     except ValueError:
         start_idx, end_idx = 0, len(all_points) - 1
 
+    # 1.1 输入轨迹起始时刻与采样间隔
+    try:
+        utc_date_str = input("请输入UTC日期 (YYYY-MM-DD, 例如 2026-03-21): ").strip()
+        utc_time_str = input("请输入UTC时间 (HH:MM:SS.sss, 例如 03:26:00.000): ").strip()
+        interval_sec = float(input("请输入采样间隔(秒, 例如 1.0): ").strip() or "1.0")
+        utc_start = datetime.fromisoformat(f"{utc_date_str}T{utc_time_str}").replace(tzinfo=timezone.utc)
+    except Exception:
+        print("错误: UTC日期/时间/采样间隔格式不正确。")
+        return
+
     # 截取选定区间
     selected = all_points[start_idx: end_idx + 1]
 
@@ -125,15 +149,17 @@ def main():
         pt['X'], pt['Y'], pt['Z'] = lla_to_ecef(pt['lat'], pt['lon'], pt['alt'])
 
     # 3. 创建输出目录
-    output_dir = os.path.join(os.path.dirname(file_path), "Phone_coordinates")
+    output_dir = os.path.join(os.path.dirname(file_path), "Phone_dynamic_coordinates")
     if not os.path.exists(output_dir): os.makedirs(output_dir)
 
     # 4. 初始化输出文件
-    handlers = {name: open(os.path.join(output_dir, f"{name}_TruePos.dat"), 'w', encoding='gbk') for name in LEVER_ARMS}
+    handlers = {name: open(os.path.join(output_dir, f"{name}_TruePos.txt"), 'w', encoding='utf-8') for name in LEVER_ARMS}
 
     print("-> 正在解算轨迹...")
     for i in range(len(selected)):
         pt = selected[i]
+        utc_i = utc_start + timedelta(seconds=i * interval_sec)
+        _, sow_i = utc_to_gps_week_sow(utc_i)
 
         # 5. 计算航向 (Heading)
         # 使用中心差分或端点差分推算运动方向
@@ -157,7 +183,7 @@ def main():
         # 6. 应用杆臂并保存
         for name, offset in LEVER_ARMS.items():
             tx, ty, tz = apply_lever_arm(pt['X'], pt['Y'], pt['Z'], pt['lat'], pt['lon'], heading, offset)
-            handlers[name].write(f"{pt['id']},{tx:.4f},{ty:.4f},{tz:.4f}\n")
+            handlers[name].write(f"{sow_i:.3f} {tx:.6f} {ty:.6f} {tz:.6f}\n")
 
     for h in handlers.values(): h.close()
     print(f"成功！结果保存在: {output_dir}")
