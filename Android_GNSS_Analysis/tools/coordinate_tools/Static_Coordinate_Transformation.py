@@ -1,16 +1,27 @@
 import tkinter as tk
-from tkinter import filedialog
+from tkinter import filedialog, messagebox, ttk
 import math
 import os
+import tempfile
 
+# =================================================================
+# 1. 常量与 WGS84 椭球体参数
+# =================================================================
+A_EARTH = 6378137.0
+F_EARTH = 1 / 298.257223563
+# 修正此处：统一使用大写变量名
+E_SQ = 2 * F_EARTH - F_EARTH ** 2
+
+
+# =================================================================
+# 2. 核心数学转换函数
+# =================================================================
 
 def dms_to_degrees(degrees, minutes, seconds):
-    """将度分秒格式转换为十进制度格式"""
     return degrees + minutes / 60 + seconds / 3600
 
 
 def degrees_to_dms(degrees):
-    """将十进制度格式转换为度分秒格式"""
     d = int(degrees)
     md = abs(degrees - d) * 60
     m = int(md)
@@ -19,140 +30,105 @@ def degrees_to_dms(degrees):
 
 
 def deg_to_xyz(lat_deg, lon_deg, height):
-    """
-    将经纬度(度)和大地高转换为WGS84坐标系下的XYZ坐标
-    参数:
-        lat_deg: 纬度(度)
-        lon_deg: 经度(度)
-        height: 大地高(米)
-    返回:
-        X, Y, Z: WGS84坐标系下的XYZ坐标(米)
-    """
-    # WGS84椭球体参数
-    a = 6378137.0  # 长半轴(米)
-    f = 1 / 298.257223563  # 扁率
-    e_sq = 2 * f - f ** 2  # 第一偏心率的平方
-
-    # 转换为弧度
     lat_rad = math.radians(lat_deg)
     lon_rad = math.radians(lon_deg)
-
-    # 计算卯酉圈曲率半径
-    N = a / math.sqrt(1 - e_sq * math.sin(lat_rad) ** 2)
-
-    # 计算XYZ坐标
+    N = A_EARTH / math.sqrt(1 - E_SQ * math.sin(lat_rad) ** 2)
     X = (N + height) * math.cos(lat_rad) * math.cos(lon_rad)
     Y = (N + height) * math.cos(lat_rad) * math.sin(lon_rad)
-    Z = (N * (1 - e_sq) + height) * math.sin(lat_rad)
-
+    Z = (N * (1 - E_SQ) + height) * math.sin(lat_rad)
     return X, Y, Z
 
 
-def convert_coordinates(lat_dms, lon_dms, height):
-    """
-    转换经纬度和大地高
-    返回:
-        lat_deg: 纬度(度)
-        lon_deg: 经度(度)
-        height: 大地高(米)
-        X, Y, Z: WGS84坐标系下的XYZ坐标(米)
-    """
-    lat_deg = dms_to_degrees(*lat_dms)
-    lon_deg = dms_to_degrees(*lon_dms)
-    X, Y, Z = deg_to_xyz(lat_deg, lon_deg, height)
-    return lat_deg, lon_deg, height, X, Y, Z
+def xyz_to_lla(X, Y, Z):
+    lon = math.atan2(Y, X)
+    p = math.sqrt(X ** 2 + Y ** 2)
+    lat = math.atan2(Z, p * (1 - E_SQ))
+    for _ in range(10):
+        N = A_EARTH / math.sqrt(1 - E_SQ * math.sin(lat) ** 2)
+        lat = math.atan2(Z + E_SQ * N * math.sin(lat), p)
+    height = p / math.cos(lat) - N
+    return math.degrees(lat), math.degrees(lon), height
 
 
-def average_coordinates(data):
-    """
-    计算多次测量数据转换后的平均值
-    返回:
-        avg_lat: 平均纬度(度)
-        avg_lon: 平均经度(度)
-        avg_height: 平均大地高(米)
-        avg_X, avg_Y, avg_Z: 平均XYZ坐标(米)
-    """
-    total_lat = 0.0
-    total_lon = 0.0
-    total_height = 0.0
-    total_X = 0.0
-    total_Y = 0.0
-    total_Z = 0.0
-    num_measurements = len(data)
+def get_ecef_offset(avg_lat, avg_lon, dx, dy, dz, heading_deg):
+    heading_rad = math.radians(heading_deg)
+    lat_rad = math.radians(avg_lat)
+    lon_rad = math.radians(avg_lon)
 
-    for lat_dms, lon_dms, height in data:
-        lat_deg, lon_deg, height, X, Y, Z = convert_coordinates(lat_dms, lon_dms, height)
-        total_lat += lat_deg
-        total_lon += lon_deg
-        total_height += height
-        total_X += X
-        total_Y += Y
-        total_Z += Z
+    # 机体坐标系 -> 站心坐标系 (ENU)
+    dE = dx * math.cos(heading_rad) + dy * math.sin(heading_rad)
+    dN = -dx * math.sin(heading_rad) + dy * math.cos(heading_rad)
+    dU = dz
 
-    if num_measurements == 0:
-        return (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+    # ENU -> ECEF 偏移量
+    slat, clat = math.sin(lat_rad), math.cos(lat_rad)
+    slon, clon = math.sin(lon_rad), math.cos(lon_rad)
 
-    avg_lat = total_lat / num_measurements
-    avg_lon = total_lon / num_measurements
-    avg_height = total_height / num_measurements
-    avg_X = total_X / num_measurements
-    avg_Y = total_Y / num_measurements
-    avg_Z = total_Z / num_measurements
+    dX_ecef = -slon * dE - slat * clon * dN + clat * clon * dU
+    dY_ecef = clon * dE - slat * slon * dN + clat * slon * dU
+    dZ_ecef = clat * dN + slat * dU
 
-    return avg_lat, avg_lon, avg_height, avg_X, avg_Y, avg_Z
+    return dX_ecef, dY_ecef, dZ_ecef
 
+
+# =================================================================
+# 3. 逻辑处理
+# =================================================================
 
 def read_data_from_file(file_path):
-    """
-    从文件读取测量数据
-    支持的格式: 点号,纬度(度分秒),经度(度分秒),大地高
-    返回:
-        数据列表，每个元素为 (纬度DMS元组, 经度DMS元组, 大地高)
-    """
     data = []
     encodings = ['gbk', 'utf-8']
     for encoding in encodings:
         try:
             with open(file_path, 'r', encoding=encoding) as file:
-                print(f"成功以 {encoding} 编码打开文件: {file_path}")
-                for i, line in enumerate(file, 1):
+                for line in file:
                     line = line.strip().rstrip(',')
-                    print(f"第{i}行数据: {line}")
-                    if line:
-                        parts = line.split(',')
-                        if len(parts) == 4:
-                            try:
-                                lat_parts = list(
-                                    map(float, parts[1].replace('°', ' ').replace('′', ' ').replace('″', ' ').split()))
-                                lon_parts = list(
-                                    map(float, parts[2].replace('°', ' ').replace('′', ' ').replace('″', ' ').split()))
-                                height = float(parts[3])
-                                if len(lat_parts) == 3 and len(lon_parts) == 3:
-                                    data.append((tuple(lat_parts), tuple(lon_parts), height))
-                            except ValueError as e:
-                                print(f"数据格式错误-文件:{file_path}, 行:{i}, 错误信息: {e}")
+                    if not line: continue
+                    parts = line.split(',')
+                    if len(parts) == 4:
+                        try:
+                            # 清洗经纬度中的符号
+                            lats = parts[1].replace('°', ' ').replace('′', ' ').replace('″', ' ').split()
+                            lons = parts[2].replace('°', ' ').replace('′', ' ').replace('″', ' ').split()
+                            lat_p = list(map(float, lats))
+                            lon_p = list(map(float, lons))
+                            height = float(parts[3])
+                            if len(lat_p) == 3 and len(lon_p) == 3:
+                                data.append((tuple(lat_p), tuple(lon_p), height))
+                        except:
+                            continue
             break
-        except UnicodeDecodeError:
-            print(f"无法以 {encoding} 编码打开文件: {file_path}, 尝试其他编码...")
-        except Exception as e:
-            print(f"读取文件时出现错误-文件:{file_path}, 错误信息: {e}")
+        except:
+            continue
     return data
 
 
-def save_results(file_path, avg_lat, avg_lon, avg_height, avg_X, avg_Y, avg_Z):
-    """保存计算结果到文件"""
+def average_coordinates(data):
+    total_lat = total_lon = total_height = total_X = total_Y = total_Z = 0.0
+    for lat_dms, lon_dms, h in data:
+        lat_deg = dms_to_degrees(*lat_dms)
+        lon_deg = dms_to_degrees(*lon_dms)
+        X, Y, Z = deg_to_xyz(lat_deg, lon_deg, h)
+        total_lat += lat_deg
+        total_lon += lon_deg
+        total_height += h
+        total_X += X
+        total_Y += Y
+        total_Z += Z
+    n = len(data)
+    return total_lat / n, total_lon / n, total_height / n, total_X / n, total_Y / n, total_Z / n
+
+
+def save_results_as_original_format(file_path, avg_lat, avg_lon, avg_height, avg_X, avg_Y, avg_Z, prefix="Avg"):
     try:
         file_dir = os.path.dirname(file_path)
-        file_name = os.path.basename(file_path)
-        base_name, ext = os.path.splitext(file_name)
-        output_file_name = f"Avg-{base_name}{ext}"
+        base_name = os.path.splitext(os.path.basename(file_path))[0]
+        output_file_name = f"{prefix}-{base_name}.txt"
         output_file_path = os.path.join(file_dir, output_file_name)
-
         lat_dms = degrees_to_dms(avg_lat)
         lon_dms = degrees_to_dms(avg_lon)
-
         with open(output_file_path, 'w', encoding='gbk') as file:
-            file.write(f"Avg-WGS84-{base_name}\n")
+            file.write(f"{prefix}-WGS84-{base_name}\n")
             file.write(f"---------------------------------------------\n")
             file.write(f"Lat(dms)：{lat_dms[0]}°{lat_dms[1]}′{lat_dms[2]:.6f}″\n")
             file.write(f"Lon(dms)：{lon_dms[0]}°{lon_dms[1]}′{lon_dms[2]:.6f}″\n")
@@ -165,115 +141,205 @@ def save_results(file_path, avg_lat, avg_lon, avg_height, avg_X, avg_Y, avg_Z):
             file.write(f"X(ECEF/m)：{avg_X:.6f}\n")
             file.write(f"Y(ECEF/m)：{avg_Y:.6f}\n")
             file.write(f"Z(ECEF/m)：{avg_Z:.6f}\n")
-
-        print(f"结果已保存至: {output_file_path}")
         return output_file_path
-    except Exception as e:
-        print(f"保存结果时出现错误-文件:{file_path}, 错误信息: {e}")
+    except:
         return None
 
 
 def show_line_selection_dialog(lines):
-    """
-    弹出窗口让用户选择要处理的行，返回所选行的索引列表
-    """
-    import tkinter as tk
     selected_indices = []
+
     def on_ok():
         nonlocal selected_indices
         selected_indices = list(listbox.curselection())
         win.destroy()
 
     win = tk.Toplevel()
-    win.title("选择要处理的数据行")
-    win.geometry("700x500")  # 增加窗口高度
-    tk.Label(win, text="请选择要处理的行（可多选）：").pack(pady=(10, 0))
+    win.title("数据行过滤")
+    win.geometry("700x500")
     frame = tk.Frame(win)
-    frame.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+    frame.pack(fill="both", expand=True, padx=10, pady=5)
     scrollbar = tk.Scrollbar(frame)
     scrollbar.pack(side="right", fill="y")
     listbox = tk.Listbox(frame, selectmode=tk.MULTIPLE, width=100, height=20, yscrollcommand=scrollbar.set)
     for idx, line in enumerate(lines):
-        listbox.insert(tk.END, f"{idx+1}: {line.strip()}")
+        listbox.insert(tk.END, f"{idx + 1}: {line.strip()}")
     listbox.pack(side="left", fill="both", expand=True)
     scrollbar.config(command=listbox.yview)
-
-    # 按钮区域，横向布局，居中显示
     btn_frame = tk.Frame(win)
-    btn_frame.pack(pady=10, fill="x")
-    btn_frame.grid_columnconfigure(0, weight=1)
-    btn_frame.grid_columnconfigure(1, weight=1)
-    def select_all():
-        listbox.select_set(0, tk.END)
-    btn_select_all = tk.Button(btn_frame, text="选择全部", command=select_all, width=16)
-    btn_select_all.grid(row=0, column=0, padx=40)
-    btn_ok = tk.Button(btn_frame, text="确定", command=on_ok, width=16)
-    btn_ok.grid(row=0, column=1, padx=40)
-
+    btn_frame.pack(pady=10)
+    tk.Button(btn_frame, text="全选", command=lambda: listbox.select_set(0, tk.END), width=10).pack(side="left",
+                                                                                                    padx=20)
+    tk.Button(btn_frame, text="确认解算", command=on_ok, width=10, bg="#4CAF50", fg="white").pack(side="left", padx=20)
     win.grab_set()
     win.wait_window()
     return selected_indices
 
 
+# =================================================================
+# 4. 集成主界面
+# =================================================================
+
+class MainApp:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("RTK 静态坐标转换与多手机平差工具")
+        self.root.geometry("650x650")
+
+        # 1. 顶部控制栏
+        top_frame = tk.Frame(root, pady=10)
+        top_frame.pack(fill='x', padx=20)
+
+        tk.Label(top_frame, text="全局航向角 (Heading):").pack(side='left')
+        self.ent_heading = tk.Entry(top_frame, width=10)
+        self.ent_heading.insert(0, "138.0")
+        self.ent_heading.pack(side='left', padx=10)
+
+        btn_select = tk.Button(top_frame, text="选择原始数据文件", command=self.select_files, bg="#2196F3", fg="white")
+        btn_select.pack(side='right')
+
+        self.selected_files = []
+        self.file_label = tk.Label(root, text="未加载文件", fg="gray")
+        self.file_label.pack()
+
+        # 2. 手机配置区 (带滚动条)
+        self.config_frame = tk.LabelFrame(root, text="手机位置参数设置 (机体系：X右+ / Y前+ / Z上+)")
+        self.config_frame.pack(fill='both', expand=True, padx=20, pady=10)
+
+        # 表头布局
+        header = tk.Frame(self.config_frame)
+        header.pack(fill='x', padx=5, pady=5)
+        headers = [("手机标识", 18), ("dX (m)", 12), ("dY (m)", 12), ("dZ (m)", 12), ("操作", 10)]
+        for text, w in headers:
+            tk.Label(header, text=text, width=w, font=('Arial', 9, 'bold')).pack(side='left', padx=5)
+
+        # 滚动区域
+        self.canvas = tk.Canvas(self.config_frame, highlightthickness=0)
+        self.scrollbar = tk.Scrollbar(self.config_frame, orient="vertical", command=self.canvas.yview)
+        self.scrollable_frame = tk.Frame(self.canvas)
+
+        self.scrollable_frame.bind(
+            "<Configure>",
+            lambda e: self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+        )
+
+        self.canvas.create_window((0, 0), window=self.scrollable_frame, anchor="nw")
+        self.canvas.configure(yscrollcommand=self.scrollbar.set)
+
+        self.canvas.pack(side="left", fill="both", expand=True)
+        self.scrollbar.pack(side="right", fill="y")
+
+        self.phone_rows = []
+        # 初始化默认三个手机 (与动态场景一致)
+        self.add_phone_row("Left_Phone", "-0.13", "0.356", "0.02")
+        self.add_phone_row("Middle_Phone", "0.0", "0.356", "0.02")
+        self.add_phone_row("Right_Phone", "0.14", "0.356", "0.02")
+
+        # 3. 底部操作栏
+        bottom_frame = tk.Frame(root, pady=20)
+        bottom_frame.pack(fill='x')
+
+        tk.Button(bottom_frame, text="+ 添加新手机配置",
+                  command=lambda: self.add_phone_row("New_Phone", "0.0", "0.0", "0.0"), width=18).pack(side='left',
+                                                                                                       padx=50)
+        tk.Button(bottom_frame, text="▶ 执行批量转换", command=self.run_process, bg="#4CAF50", fg="white",
+                  font=("Arial", 11, "bold"), width=20).pack(side='right', padx=50)
+
+    def add_phone_row(self, name, dx, dy, dz):
+        row = tk.Frame(self.scrollable_frame)
+        row.pack(fill='x', pady=2)
+
+        e_name = tk.Entry(row, width=18)
+        e_name.insert(0, name)
+        e_name.pack(side='left', padx=5)
+        e_dx = tk.Entry(row, width=12)
+        e_dx.insert(0, dx)
+        e_dx.pack(side='left', padx=5)
+        e_dy = tk.Entry(row, width=12)
+        e_dy.insert(0, dy)
+        e_dy.pack(side='left', padx=5)
+        e_dz = tk.Entry(row, width=12)
+        e_dz.insert(0, dz)
+        e_dz.pack(side='left', padx=5)
+
+        btn_del = tk.Button(row, text="移除", command=lambda r=row: self.remove_row(r), fg="red", font=('Arial', 8))
+        btn_del.pack(side='left', padx=15)
+
+        self.phone_rows.append({'frame': row, 'entries': [e_name, e_dx, e_dy, e_dz]})
+
+    def remove_row(self, row_frame):
+        for i, row in enumerate(self.phone_rows):
+            if row['frame'] == row_frame:
+                row['frame'].destroy()
+                self.phone_rows.pop(i)
+                break
+
+    def select_files(self):
+        files = filedialog.askopenfilenames(title="选择数据文件",
+                                            filetypes=(("文本/数据", "*.dat *.txt"), ("所有文件", "*.*")))
+        if files:
+            self.selected_files = list(files)
+            self.file_label.config(text=f"已载入 {len(files)} 个文件", fg="black")
+
+    def run_process(self):
+        if not self.selected_files:
+            messagebox.showwarning("提示", "请先选择数据文件！")
+            return
+        try:
+            heading = float(self.ent_heading.get())
+            configs = []
+            for row in self.phone_rows:
+                configs.append((row['entries'][0].get(), float(row['entries'][1].get()), float(row['entries'][2].get()),
+                                float(row['entries'][3].get())))
+        except:
+            messagebox.showerror("参数错误", "请确保所有偏移坐标和航向角均为有效数字！")
+            return
+
+        for f_path in self.selected_files:
+            self.process_file(f_path, heading, configs)
+        messagebox.showinfo("成功", "所有文件处理完成！")
+
+    def process_file(self, file_path, heading, configs):
+        # 读取内容
+        lines = []
+        for enc in ['gbk', 'utf-8']:
+            try:
+                with open(file_path, 'r', encoding=enc) as f:
+                    lines = f.readlines()
+                break
+            except:
+                continue
+
+        if not lines: return
+
+        # 弹出行选择器
+        selected_idx = show_line_selection_dialog(lines)
+        if not selected_idx: return
+
+        selected_lines = [lines[i] for i in selected_idx]
+        with tempfile.NamedTemporaryFile('w+', delete=False, encoding='utf-8') as tmp:
+            tmp.writelines(selected_lines)
+            tmp_path = tmp.name
+
+        measurements = read_data_from_file(tmp_path)
+        os.remove(tmp_path)
+
+        if measurements:
+            # 1. 计算 RTK 平均位置
+            r_lat, r_lon, r_h, r_X, r_Y, r_Z = average_coordinates(measurements)
+            save_results_as_original_format(file_path, r_lat, r_lon, r_h, r_X, r_Y, r_Z, prefix="Avg-RTK")
+
+            # 2. 依次计算不同手机位置
+            for name, dx, dy, dz in configs:
+                dX_e, dY_e, dZ_e = get_ecef_offset(r_lat, r_lon, dx, dy, dz, heading)
+                p_X, p_Y, p_Z = r_X + dX_e, r_Y + dY_e, r_Z + dZ_e
+                p_lat, p_lon, p_h = xyz_to_lla(p_X, p_Y, p_Z)
+
+                save_results_as_original_format(file_path, p_lat, p_lon, p_h, p_X, p_Y, p_Z, prefix=f"Avg-{name}")
+                print(f"[日志] 文件 {os.path.basename(file_path)}: 手机 {name} 已处理。")
+
+
 if __name__ == "__main__":
     root = tk.Tk()
-    root.withdraw()
-
-    # 允许选择多个文件
-    file_paths = filedialog.askopenfilenames(title="选择数据文件",
-                                             filetypes=(("文本文件", "*.dat *.txt"), ("所有文件", "*.*")))
-
-    if file_paths:
-        for file_path in file_paths:
-            print(f"\n处理文件: {file_path}")
-            # 先读取所有原始行
-            encodings = ['gbk', 'utf-8']
-            lines = []
-            for encoding in encodings:
-                try:
-                    with open(file_path, 'r', encoding=encoding) as f:
-                        lines = f.readlines()
-                    break
-                except UnicodeDecodeError:
-                    continue
-            if not lines:
-                print(f"无法读取文件: {file_path}")
-                continue
-            # 弹窗让用户选择要处理的行
-            selected_indices = show_line_selection_dialog(lines)
-            if not selected_indices:
-                print(f"未选择任何行，跳过文件: {file_path}")
-                continue
-            # 只处理选中的行
-            selected_lines = [lines[i] for i in selected_indices]
-            # 将选中的行写入临时文件，复用原有读取逻辑
-            import tempfile
-            with tempfile.NamedTemporaryFile('w+', delete=False, encoding='utf-8') as tmpf:
-                for line in selected_lines:
-                    tmpf.write(line)
-                tmpf_path = tmpf.name
-            measurements = read_data_from_file(tmpf_path)
-            os.remove(tmpf_path)
-            if measurements:
-                avg_lat, avg_lon, avg_height, avg_X, avg_Y, avg_Z = average_coordinates(measurements)
-
-                # 转换为度分秒格式用于显示
-                lat_dms = degrees_to_dms(avg_lat)
-                lon_dms = degrees_to_dms(avg_lon)
-
-                print("--------------------------------------------------------")
-                print(f"文件: {file_path} 处理结果:")
-                print(f"平均纬度(dms): {lat_dms[0]}°{lat_dms[1]}′{lat_dms[2]:.6f}″")
-                print(f"平均经度(dms): {lon_dms[0]}°{lon_dms[1]}′{lon_dms[2]:.6f}″")
-                print(f"平均纬度(deg): {avg_lat:.6f}°")
-                print(f"平均经度(deg): {avg_lon:.6f}°")
-                print(f"平均大地高: {avg_height:.4f}m")
-                print(f"平均X坐标: {avg_X:.6f}m")
-                print(f"平均Y坐标: {avg_Y:.6f}m")
-                print(f"平均Z坐标: {avg_Z:.6f}m")
-
-                save_results(file_path, avg_lat, avg_lon, avg_height, avg_X, avg_Y, avg_Z)
-            else:
-                print(f"文件: {file_path} 中未找到有效的数据")
-    else:
-        print("未选择任何文件")
+    app = MainApp(root)
+    root.mainloop()

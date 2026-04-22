@@ -3,7 +3,7 @@ import re
 import os
 from datetime import datetime, timezone, timedelta
 import tkinter as tk
-from tkinter import filedialog
+from tkinter import filedialog, messagebox
 
 # =================================================================
 # 1. 常量与参数配置 (WGS84 椭球体参数)
@@ -11,14 +11,6 @@ from tkinter import filedialog
 A_EARTH = 6378137.0  # 长半轴 (单位: m)
 F_EARTH = 1.0 / 298.257223563  # 扁率
 E2_EARTH = 2 * F_EARTH - F_EARTH ** 2  # 第一偏心率平方
-
-# 【关键配置】杆臂值 (Lever Arm): 手机相对于 RTK 中心的偏移量
-# 坐标系定义: Y轴向前(行进方向), X轴向右, Z轴向上
-LEVER_ARMS = {
-    'Phone_K_Left': {'dx': -0.075, 'dy': 0.0, 'dz': 0.09},
-    'Phone_F_Front': {'dx': 0.0, 'dy': 0.075, 'dz': 0.09},
-    'Phone_A_Right': {'dx': 0.075, 'dy': 0.0, 'dz': 0.09}
-}
 
 # GPS 与 UTC 的闰秒差（截至当前通常为 18s）
 GPS_UTC_LEAP_SECONDS = 18
@@ -96,98 +88,240 @@ def utc_to_gps_week_sow(utc_dt):
     return gps_week, sow
 
 
+def utc_to_gpst_str(utc_dt):
+    """UTC datetime -> GPST格式字符串 (YYYY/MM/DD HH:MM:SS.sss)"""
+    gpst_dt = utc_dt + timedelta(seconds=GPS_UTC_LEAP_SECONDS)
+    return gpst_dt.strftime("%Y/%m/%d %H:%M:%S.%f")[:-3]
+
+
 # =================================================================
-# 3. 主程序逻辑
+# 3. 集成式 GUI 应用程序类
 # =================================================================
 
-def main():
-    root = tk.Tk()
-    root.withdraw()
-    file_path = filedialog.askopenfilename(title="选择 RTK 数据文件", filetypes=[("Data Files", "*.dat *.txt")])
-    if not file_path: return
+class RTKProcessorApp:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("GNSS 动态坐标与杆臂解算工具")
+        self.root.geometry("550x650")
+        self.root.resizable(False, False)
 
-    all_points = []
-    # 尝试不同编码读取文件
-    for enc in ['gbk', 'utf-8']:
+        # 将窗口居中
+        self.root.update_idletasks()
+        x = (self.root.winfo_screenwidth() - self.root.winfo_reqwidth()) // 2
+        y = (self.root.winfo_screenheight() - self.root.winfo_reqheight()) // 2
+        self.root.geometry(f"+{x}+{y}")
+
+        self.all_points = []
+        self.file_path = ""
+        self.lever_arm_entries = {}
+
+        self.create_widgets()
+
+    def create_widgets(self):
+        # --- 1. 文件选择区 ---
+        frame_file = tk.LabelFrame(self.root, text=" 1. 数据文件 ", padx=10, pady=10)
+        frame_file.pack(fill="x", padx=15, pady=10)
+
+        self.btn_select_file = tk.Button(frame_file, text="选择 RTK 数据文件", command=self.load_file, bg="#E8F0FE")
+        self.btn_select_file.pack(side="left")
+
+        self.lbl_file_info = tk.Label(frame_file, text="未选择文件", fg="gray")
+        self.lbl_file_info.pack(side="left", padx=15)
+
+        self.lbl_points_count = tk.Label(frame_file, text="历元总数: 0", font=("Arial", 9, "bold"), fg="blue")
+        self.lbl_points_count.pack(side="right")
+
+        # --- 2. 轨迹参数区 ---
+        frame_params = tk.LabelFrame(self.root, text=" 2. 轨迹与时间参数 ", padx=10, pady=10)
+        frame_params.pack(fill="x", padx=15, pady=5)
+
+        tk.Label(frame_params, text="UTC日期 (YYYY-MM-DD):").grid(row=0, column=0, sticky="e", pady=5)
+        self.ent_date = tk.Entry(frame_params, width=15)
+        self.ent_date.insert(0, "2026-03-21")
+        self.ent_date.grid(row=0, column=1, padx=5, pady=5)
+
+        tk.Label(frame_params, text="UTC时间 (HH:MM:SS.sss):").grid(row=0, column=2, sticky="e", pady=5)
+        self.ent_time = tk.Entry(frame_params, width=15)
+        self.ent_time.insert(0, "03:26:00.000")
+        self.ent_time.grid(row=0, column=3, padx=5, pady=5)
+
+        tk.Label(frame_params, text="采样间隔 (秒):").grid(row=1, column=0, sticky="e", pady=5)
+        self.ent_interval = tk.Entry(frame_params, width=15)
+        self.ent_interval.insert(0, "1.0")
+        self.ent_interval.grid(row=1, column=1, padx=5, pady=5)
+
+        tk.Label(frame_params, text="起始索引 (默认0):").grid(row=2, column=0, sticky="e", pady=5)
+        self.ent_start_idx = tk.Entry(frame_params, width=15)
+        self.ent_start_idx.insert(0, "0")
+        self.ent_start_idx.grid(row=2, column=1, padx=5, pady=5)
+
+        tk.Label(frame_params, text="结束索引:").grid(row=2, column=2, sticky="e", pady=5)
+        self.ent_end_idx = tk.Entry(frame_params, width=15)
+        self.ent_end_idx.grid(row=2, column=3, padx=5, pady=5)
+
+        # --- 3. 杆臂值区 ---
+        frame_lever = tk.LabelFrame(self.root, text=" 3. 杆臂值设置 (相对于RTK中心, 单位: 米) ", padx=10, pady=10)
+        frame_lever.pack(fill="x", padx=15, pady=10)
+
+        tk.Label(frame_lever, text="手机名称", font=("Arial", 9, "bold")).grid(row=0, column=0, padx=5, pady=5)
+        tk.Label(frame_lever, text="dX (向右为正)", font=("Arial", 9, "bold")).grid(row=0, column=1, padx=5, pady=5)
+        tk.Label(frame_lever, text="dY (向前为正)", font=("Arial", 9, "bold")).grid(row=0, column=2, padx=5, pady=5)
+        tk.Label(frame_lever, text="dZ (向上为正)", font=("Arial", 9, "bold")).grid(row=0, column=3, padx=5, pady=5)
+
+        # 默认配置
+        phones = [
+            ("Phone_Left", -0.13, 0.356, 0.02),
+            ("Phone_Center", 0.00, 0.356, 0.02),
+            ("Phone_Right", 0.14, 0.356, 0.02)
+        ]
+
+        for i, (name, def_dx, def_dy, def_dz) in enumerate(phones):
+            tk.Label(frame_lever, text=name).grid(row=i + 1, column=0, padx=5, pady=5)
+            ent_dx = tk.Entry(frame_lever, width=10)
+            ent_dx.insert(0, str(def_dx))
+            ent_dx.grid(row=i + 1, column=1, padx=5, pady=5)
+
+            ent_dy = tk.Entry(frame_lever, width=10)
+            ent_dy.insert(0, str(def_dy))
+            ent_dy.grid(row=i + 1, column=2, padx=5, pady=5)
+
+            ent_dz = tk.Entry(frame_lever, width=10)
+            ent_dz.insert(0, str(def_dz))
+            ent_dz.grid(row=i + 1, column=3, padx=5, pady=5)
+
+            self.lever_arm_entries[name] = (ent_dx, ent_dy, ent_dz)
+
+        # --- 4. 运行按钮 ---
+        self.btn_run = tk.Button(self.root, text="▶ 开 始 解 算", font=("Arial", 12, "bold"), bg="#4CAF50", fg="white",
+                                 height=2, command=self.process_data)
+        self.btn_run.pack(fill="x", padx=15, pady=20)
+
+    def load_file(self):
+        """选择并解析文件，更新UI状态"""
+        file_path = filedialog.askopenfilename(title="选择 RTK 数据文件", filetypes=[("Data Files", "*.dat *.txt")])
+        if not file_path: return
+
+        self.file_path = file_path
+        filename = os.path.basename(file_path)
+        self.lbl_file_info.config(text=filename, fg="black")
+
+        self.all_points = []
+        for enc in ['gbk', 'utf-8']:
+            try:
+                with open(file_path, 'r', encoding=enc) as f:
+                    for line in f:
+                        res = parse_line(line)
+                        if res: self.all_points.append(res)
+                if self.all_points: break
+            except UnicodeDecodeError:
+                continue
+
+        if not self.all_points:
+            messagebox.showerror("文件错误", "未能解析到有效数据，请检查文件格式。")
+            self.lbl_points_count.config(text="历元总数: 0", fg="red")
+            return
+
+        total_pts = len(self.all_points)
+        self.lbl_points_count.config(text=f"历元总数: {total_pts}", fg="green")
+
+        # 自动填充默认索引
+        self.ent_start_idx.delete(0, tk.END)
+        self.ent_start_idx.insert(0, "0")
+        self.ent_end_idx.delete(0, tk.END)
+        self.ent_end_idx.insert(0, str(total_pts - 1))
+
+    def process_data(self):
+        """核心处理逻辑"""
+        if not self.all_points:
+            messagebox.showwarning("提示", "请先选择并加载有效的数据文件！")
+            return
+
+        # 1. 读取并校验输入参数
         try:
-            with open(file_path, 'r', encoding=enc) as f:
-                for line in f:
-                    res = parse_line(line)
-                    if res: all_points.append(res)
-            if all_points: break
-        except UnicodeDecodeError:
-            continue
+            start_idx = int(self.ent_start_idx.get())
+            end_idx = int(self.ent_end_idx.get())
+            if start_idx < 0 or end_idx >= len(self.all_points) or start_idx > end_idx:
+                raise ValueError("索引越界")
 
-    if not all_points:
-        print("错误: 未能解析到有效数据。")
-        return
+            utc_date_str = self.ent_date.get().strip()
+            utc_time_str = self.ent_time.get().strip()
+            interval_sec = float(self.ent_interval.get())
+            utc_start = datetime.fromisoformat(f"{utc_date_str}T{utc_time_str}").replace(tzinfo=timezone.utc)
 
-    # 1. 交互选择区间
-    print(f"\n[文件读取成功] 共有 {len(all_points)} 个历元。")
-    try:
-        start_idx = int(input(f"请输入起始索引 (0~{len(all_points) - 1}, 默认0): ") or 0)
-        end_idx = int(input(f"请输入结束索引 ({start_idx}~{len(all_points) - 1}, 默认末尾): ") or len(all_points) - 1)
-    except ValueError:
-        start_idx, end_idx = 0, len(all_points) - 1
+            lever_arms = {}
+            for name, (edx, edy, edz) in self.lever_arm_entries.items():
+                lever_arms[name] = {
+                    'dx': float(edx.get()),
+                    'dy': float(edy.get()),
+                    'dz': float(edz.get())
+                }
+        except ValueError as e:
+            messagebox.showerror("输入错误", "参数格式或数值有误，请检查！(注意日期时间格式和数字)")
+            return
+        except Exception as e:
+            messagebox.showerror("时间格式错误", "UTC时间解析失败，请确保格式如: 2026-03-21 和 03:26:00.000")
+            return
 
-    # 1.1 输入轨迹起始时刻与采样间隔
-    try:
-        utc_date_str = input("请输入UTC日期 (YYYY-MM-DD, 例如 2026-03-21): ").strip()
-        utc_time_str = input("请输入UTC时间 (HH:MM:SS.sss, 例如 03:26:00.000): ").strip()
-        interval_sec = float(input("请输入采样间隔(秒, 例如 1.0): ").strip() or "1.0")
-        utc_start = datetime.fromisoformat(f"{utc_date_str}T{utc_time_str}").replace(tzinfo=timezone.utc)
-    except Exception:
-        print("错误: UTC日期/时间/采样间隔格式不正确。")
-        return
+        # 2. 截取并预计算
+        selected = self.all_points[start_idx: end_idx + 1]
+        for pt in selected:
+            pt['X'], pt['Y'], pt['Z'] = lla_to_ecef(pt['lat'], pt['lon'], pt['alt'])
 
-    # 截取选定区间
-    selected = all_points[start_idx: end_idx + 1]
+        # 3. 创建输出环境
+        output_dir = os.path.join(os.path.dirname(self.file_path), "Phone_dynamic_coordinates")
+        if not os.path.exists(output_dir): os.makedirs(output_dir)
 
-    # 2. 【修复关键点】预先计算所有选定点的 ECEF 坐标
-    # 这样在后续计算方位角引用前后点时，'X','Y','Z' 键才一定存在
-    for pt in selected:
-        pt['X'], pt['Y'], pt['Z'] = lla_to_ecef(pt['lat'], pt['lon'], pt['alt'])
+        handlers = {name: open(os.path.join(output_dir, f"{name}_TruePos.txt"), 'w', encoding='utf-8') for name in
+                    lever_arms}
+        pos_handlers = {}
+        for name in lever_arms:
+            pos_file = open(os.path.join(output_dir, f"{name}_TruePos.pos"), 'w', encoding='utf-8')
+            pos_file.write("%  GPST                      x-ecef(m)      y-ecef(m)      z-ecef(m)\n")
+            pos_handlers[name] = pos_file
 
-    # 3. 创建输出目录
-    output_dir = os.path.join(os.path.dirname(file_path), "Phone_dynamic_coordinates")
-    if not os.path.exists(output_dir): os.makedirs(output_dir)
+        # 4. 循环解算
+        try:
+            for i in range(len(selected)):
+                pt = selected[i]
+                utc_i = utc_start + timedelta(seconds=i * interval_sec)
+                _, sow_i = utc_to_gps_week_sow(utc_i)
+                gpst_str = utc_to_gpst_str(utc_i)
 
-    # 4. 初始化输出文件
-    handlers = {name: open(os.path.join(output_dir, f"{name}_TruePos.txt"), 'w', encoding='utf-8') for name in LEVER_ARMS}
+                # 计算航向 (Heading)
+                if i == 0 and len(selected) > 1:
+                    p1, p2 = selected[i], selected[i + 1]
+                elif i == len(selected) - 1 and len(selected) > 1:
+                    p1, p2 = selected[i - 1], selected[i]
+                elif len(selected) > 2:
+                    p1, p2 = selected[i - 1], selected[i + 1]
+                else:
+                    p1 = p2 = pt
 
-    print("-> 正在解算轨迹...")
-    for i in range(len(selected)):
-        pt = selected[i]
-        utc_i = utc_start + timedelta(seconds=i * interval_sec)
-        _, sow_i = utc_to_gps_week_sow(utc_i)
+                dX, dY, dZ = p2['X'] - p1['X'], p2['Y'] - p1['Y'], p2['Z'] - p1['Z']
 
-        # 5. 计算航向 (Heading)
-        # 使用中心差分或端点差分推算运动方向
-        if i == 0 and len(selected) > 1:
-            p1, p2 = selected[i], selected[i + 1]  # 起始点
-        elif i == len(selected) - 1 and len(selected) > 1:
-            p1, p2 = selected[i - 1], selected[i]  # 结束点
-        elif len(selected) > 2:
-            p1, p2 = selected[i - 1], selected[i + 1]  # 中间点使用前后邻点
-        else:
-            p1 = p2 = pt
+                if dX == 0 and dY == 0:
+                    heading = 0.0
+                else:
+                    dE, dN = ecef_delta_to_enu(pt['X'], pt['Y'], pt['Z'], dX, dY, dZ)
+                    heading = math.atan2(dE, dN)
 
-        dX, dY, dZ = p2['X'] - p1['X'], p2['Y'] - p1['Y'], p2['Z'] - p1['Z']
+                # 投影及保存
+                for name, offset in lever_arms.items():
+                    tx, ty, tz = apply_lever_arm(pt['X'], pt['Y'], pt['Z'], pt['lat'], pt['lon'], heading, offset)
+                    handlers[name].write(f"{sow_i:.3f} {tx:.6f} {ty:.6f} {tz:.6f}\n")
+                    pos_handlers[name].write(f"{gpst_str}  {tx:.4f}  {ty:.4f}  {tz:.4f}\n")
 
-        if dX == 0 and dY == 0:
-            heading = 0.0  # 静止状态
-        else:
-            dE, dN = ecef_delta_to_enu(pt['X'], pt['Y'], pt['Z'], dX, dY, dZ)
-            heading = math.atan2(dE, dN)
+            messagebox.showinfo("解算完成", f"成功处理 {len(selected)} 个历元！\n\n文件已保存至:\n{output_dir}")
 
-        # 6. 应用杆臂并保存
-        for name, offset in LEVER_ARMS.items():
-            tx, ty, tz = apply_lever_arm(pt['X'], pt['Y'], pt['Z'], pt['lat'], pt['lon'], heading, offset)
-            handlers[name].write(f"{sow_i:.3f} {tx:.6f} {ty:.6f} {tz:.6f}\n")
+        except Exception as e:
+            messagebox.showerror("解算异常", f"处理过程中发生错误: {str(e)}")
 
-    for h in handlers.values(): h.close()
-    print(f"成功！结果保存在: {output_dir}")
+        finally:
+            for h in handlers.values(): h.close()
+            for h in pos_handlers.values(): h.close()
 
 
 if __name__ == "__main__":
-    main()
+    root = tk.Tk()
+    app = RTKProcessorApp(root)
+    root.mainloop()
