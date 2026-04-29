@@ -1,5 +1,6 @@
 from typing import Dict, Any, Optional, List
 from collections import defaultdict
+import re
 import pandas as pd
 from ..core.config import GNSS_FREQUENCIES, GLONASS_K_MAP, SPEED_OF_LIGHT
 
@@ -9,6 +10,46 @@ class RinexReader:
 
     Methods return dictionaries and do not modify external state.
     """
+    _PHONE_PHASE_LLI_RE = re.compile(r'^([+-]?\d+\.\d{3})([23])$')
+
+    @classmethod
+    def _parse_phone_obs_field(cls, field_raw: str, obs_type: str) -> Dict[str, Any]:
+        """Parse one 16-char RINEX observation field for phone files.
+
+        For phase observations, supports both:
+        1) Standard RINEX LLI at column 15 of the 16-char field.
+        2) Phone-specific encoding where 4th decimal digit 2/3 indicates LLI.
+        """
+        field = (field_raw or '').ljust(16)[:16]
+        value_str = field[:14].strip()
+
+        standard_lli = int(field[14]) if field[14].isdigit() else None
+        value = None
+        mobile_lli = None
+
+        if value_str:
+            if obs_type.startswith('L'):
+                m = cls._PHONE_PHASE_LLI_RE.match(value_str)
+                if m:
+                    try:
+                        value = float(m.group(1))
+                        mobile_lli = int(m.group(2))
+                    except Exception:
+                        value = None
+                        mobile_lli = None
+                else:
+                    try:
+                        value = float(value_str)
+                    except Exception:
+                        value = None
+            else:
+                try:
+                    value = float(value_str)
+                except Exception:
+                    value = None
+
+        lli = standard_lli if standard_lli is not None else mobile_lli
+        return {'value': value, 'lli': lli}
 
     def read_phone_rinex(self,
                          file_path: str,
@@ -130,13 +171,15 @@ class RinexReader:
                 # Pre-calculate indices to avoid repeated work
                 for j, obs_type in enumerate(obs_types):
                     if j < actual_fields:
-                        field = sat_data[j*16:(j+1)*16].strip()
-                        try:
-                            observations[obs_type] = float(field) if field else None
-                        except ValueError:
-                            observations[obs_type] = None
+                        field_raw = sat_data[j*16:(j+1)*16]
+                        parsed = self._parse_phone_obs_field(field_raw, obs_type)
+                        observations[obs_type] = parsed['value']
+                        if obs_type.startswith('L'):
+                            observations[f'{obs_type}_LLI'] = parsed['lli']
                     else:
                         observations[obs_type] = None
+                        if obs_type.startswith('L'):
+                            observations[f'{obs_type}_LLI'] = None
 
                 current_satellites[sat_id] = observations
 
@@ -147,13 +190,14 @@ class RinexReader:
                     suffix = freq[1:]
                     code_val = observations.get(f'C{suffix}')
                     phase_val = observations.get(f'L{suffix}')
+                    phase_lli = observations.get(f'L{suffix}_LLI')
                     doppler_val = observations.get(f'D{suffix}')
                     snr_val = observations.get(f'S{suffix}')
 
                     if freq not in observations_meters[sat_id]:
                         observations_meters[sat_id][freq] = {
                             'times': [], 'code': [], 'phase': [], 'phase_cycle': [], 'doppler': [],
-                            'wavelength': [], 'snr': []
+                            'wavelength': [], 'snr': [], 'phase_lli': []
                         }
 
                     obs_list = observations_meters[sat_id][freq]
@@ -161,6 +205,7 @@ class RinexReader:
                     obs_list['code'].append(code_val)
                     obs_list['snr'].append(snr_val)
                     obs_list['phase_cycle'].append(phase_val)
+                    obs_list['phase_lli'].append(phase_lli)
                     obs_list['wavelength'].append(wavelength)
                     
                     if phase_val is not None:

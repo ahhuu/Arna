@@ -1,12 +1,15 @@
 from typing import Dict, Any, Optional, Sequence
 import os
+import math
 import statistics
+import datetime
 import matplotlib
 # Use Agg backend for headless environments (tests/CLI). GUI can set a different backend on startup.
 # matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from matplotlib.figure import Figure
 import matplotlib.dates as mdates
+from matplotlib.lines import Line2D
 
 # 尝试导入mplcursors用于交互式数据点显示
 try:
@@ -42,6 +45,336 @@ class GNSSPlotter:
         fig.savefig(path, bbox_inches='tight')
         plt.close(fig)
         return path
+
+    def _satellite_sort_key(self, sat_id: str):
+        system_order = {'G': 0, 'R': 1, 'E': 2, 'C': 3, 'J': 4, 'I': 5}
+        if not sat_id:
+            return (99, '', 0, sat_id)
+        system = sat_id[0]
+        prn_text = sat_id[1:]
+        try:
+            prn_value = int(prn_text)
+        except Exception:
+            prn_value = 0
+        return (system_order.get(system, 99), system, prn_value, sat_id)
+
+    def _has_valid_observation(self, freq_values: Dict[str, Any], index: int) -> bool:
+        fields = ('code', 'phase_cycle', 'phase')
+        for field in fields:
+            values = freq_values.get(field, []) or []
+            if index < len(values) and values[index] is not None:
+                return True
+        return False
+
+    def _frequency_sequence_color(self, sat_id: str, freq: str, color_map: Dict[str, Any]):
+        system = sat_id[0] if sat_id else ''
+        freq_key = freq.upper()
+
+        if system == 'C':
+            if freq_key in {'L1P', 'L1D'}:
+                return color_map['L1C']
+            if freq_key == 'L2I':
+                return color_map['L2I']
+            if freq_key == 'L5P':
+                return color_map['L5Q']
+            if freq_key == 'L7Q':
+                return color_map['L7Q']
+
+        if freq_key in {'L1P', 'L1D'}:
+            return color_map['L1C']
+        if freq_key == 'L5P':
+            return color_map['L5Q']
+        if freq_key not in color_map:
+            return color_map['default']
+        return color_map[freq_key]
+
+    def _frequency_sequence_legend_label(self, sat_id: str, freq: str) -> str:
+        system_prefix_map = {
+            'C': 'B',
+        }
+        system = sat_id[0] if sat_id else ''
+        display_system = system_prefix_map.get(system, system or '?')
+        return f'{display_system}: {freq}'
+
+    def _normalize_frequency_filters(self, values):
+        if not values:
+            return set()
+        if isinstance(values, str):
+            return {values} if values else set()
+        return {str(value) for value in values if value}
+
+    def _normalize_sat_freq_filters(self, values):
+        if not values:
+            return set()
+        normalized = set()
+        for value in values:
+            if not value:
+                continue
+            if isinstance(value, tuple) and len(value) == 2:
+                normalized.add((str(value[0]), str(value[1])))
+            elif isinstance(value, list) and len(value) == 2:
+                normalized.add((str(value[0]), str(value[1])))
+            elif isinstance(value, str) and '|' in value:
+                sat_id, freq = value.split('|', 1)
+                normalized.add((sat_id, freq))
+        return normalized
+
+    def _selection_allows(self, selection, value: str) -> bool:
+        if selection is None:
+            return True
+        normalized = self._normalize_frequency_filters(selection)
+        return value in normalized
+
+    def _frequency_sequence_accepts(self, sat_id: str, freq: str,
+                                    system_filters=None,
+                                    sat_filters=None,
+                                    freq_filters=None) -> bool:
+        if not self._selection_allows(system_filters, sat_id[0] if sat_id else ''):
+            return False
+        if not self._selection_allows(sat_filters, sat_id):
+            return False
+        if not self._selection_allows(freq_filters, freq):
+            return False
+        return True
+
+    def _satellite_count_color(self, system: str) -> str:
+        colors = {
+            'AVE': 'tab:red',
+            'G': 'tab:orange',
+            'C': 'tab:green',
+            'R': 'tab:blue',
+            'E': 'tab:purple',
+            'J': 'tab:brown',
+            'I': 'tab:cyan',
+            'B': 'tab:red'
+        }
+        return colors.get(system.upper() if system else '', 'tab:gray')
+
+    def _stat_label(self, prefix: str, values: Sequence[int]) -> str:
+        if not values:
+            return prefix
+        avg = sum(values) / len(values)
+        return f'{prefix} AVE: {avg:.1f} MIN: {min(values)} MAX: {max(values)}'
+
+    def plot_satellite_count(self, observations: Dict[str, Any], save: bool = True,
+                             output_dir: Optional[str] = None,
+                             system_filters=None,
+                             sat_filters=None,
+                             freq_filters=None) -> Dict[str, Any]:
+        """Plot the number of visible satellites over GPST time, grouped by GNSS system."""
+        obs = observations.get('observations_meters', observations) if isinstance(observations, dict) else observations
+        if not obs:
+            raise ValueError('No observations available for satellite count plot')
+
+        time_sat_map = {}
+        systems = set()
+        for sat_id, freq_map in obs.items():
+            if not sat_id:
+                continue
+            if not self._selection_allows(system_filters, sat_id[0]) or not self._selection_allows(sat_filters, sat_id):
+                continue
+            for freq, values in (freq_map or {}).items():
+                if not self._frequency_sequence_accepts(sat_id, freq, system_filters, sat_filters, freq_filters):
+                    continue
+                times = values.get('times', []) or []
+                for idx, t in enumerate(times):
+                    if self._has_valid_observation(values, idx):
+                        time_sat_map.setdefault(t, set()).add(sat_id)
+                        systems.add(sat_id[0])
+
+        if not time_sat_map:
+            raise ValueError('No valid satellite observations found for count plot')
+
+        sorted_times = sorted(time_sat_map.keys())
+        total_counts = [len(time_sat_map[t]) for t in sorted_times]
+        system_counts = {
+            system: [sum(1 for sat in time_sat_map[t] if sat.startswith(system)) for t in sorted_times]
+            for system in sorted(systems)
+        }
+
+        max_count = max(total_counts + [max(vals) for vals in system_counts.values()] if system_counts else total_counts)
+        tick_max = max(10, int(math.ceil(max_count / 10.0) * 10))
+        y_ticks = list(range(0, tick_max + 1, 10))
+
+        fig, ax = plt.subplots(figsize=(14, 6))
+        ax.plot(sorted_times, total_counts, color=self._satellite_count_color('AVE'), linewidth=2.0, alpha=0.9, label=self._stat_label('AVE', total_counts))
+
+        legend_items = [Line2D([0], [0], color=self._satellite_count_color('AVE'), linewidth=2.0, label=self._stat_label('AVE', total_counts))]
+        for system, counts in system_counts.items():
+            if not any(counts):
+                continue
+            label = self._stat_label(system, counts)
+            color = self._satellite_count_color(system)
+            ax.plot(sorted_times, counts, color=color, linewidth=1.6, alpha=0.8, label=label)
+            legend_items.append(Line2D([0], [0], color=color, linewidth=1.6, label=label))
+
+        ax.set_xlabel('')
+        ax.set_ylabel('Satellite Count')
+        ax.set_title('Number Of Sat', pad=8)
+        ax.grid(True, axis='x', alpha=0.25)
+        ax.grid(True, axis='y', alpha=0.15)
+
+        if len(sorted_times) == 1:
+            x_min = sorted_times[0] - datetime.timedelta(minutes=1)
+            x_max = sorted_times[0] + datetime.timedelta(minutes=1)
+            ax.set_xlim(x_min, x_max)
+        else:
+            ax.set_xlim(sorted_times[0], sorted_times[-1])
+        ax.set_ylim(0, tick_max)
+        ax.set_yticks(y_ticks)
+        ax.set_yticklabels([str(y) for y in y_ticks])
+        ax.margins(x=0.02, y=0.04)
+
+        ax.xaxis.set_major_locator(mdates.AutoDateLocator(minticks=4, maxticks=10))
+        ax.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M'))
+        fig.autofmt_xdate(rotation=0, ha='center')
+
+        legend = ax.legend(handles=legend_items, loc='center right', bbox_to_anchor=(1.0, 0.5), frameon=True, fontsize='small', borderpad=0.4, fancybox=True, framealpha=0.9)
+        legend.set_draggable(True)
+        fig.subplots_adjust(left=0.08, right=0.88, top=0.96, bottom=0.08)
+
+        if save:
+            path = self._save_fig(fig, 'satellite_count', output_dir)
+            return {'figure': None, 'path': path}
+        return {'figure': fig, 'path': None}
+
+    def plot_satellite_frequency_sequence(self, observations: Dict[str, Any], save: bool = True,
+                                          output_dir: Optional[str] = None,
+                                          system_filters=None,
+                                          sat_filters=None,
+                                          freq_filters=None) -> Dict[str, Any]:
+        """Plot satellite PRN on the y-axis and GPST on the x-axis for all observed frequencies.
+
+        Only frequencies that contain at least one valid observation in the current RINEX data are drawn.
+        """
+        obs = observations.get('observations_meters', observations) if isinstance(observations, dict) else observations
+        if not obs:
+            raise ValueError('No observations available for satellite frequency sequence plot')
+
+        satellite_ids = sorted(obs.keys(), key=self._satellite_sort_key)
+        visible_satellite_ids = []
+        freq_names = []
+        for sat_id in satellite_ids:
+            sat_has_visible_data = False
+            for freq, values in (obs.get(sat_id) or {}).items():
+                times = values.get('times', []) or []
+                if self._frequency_sequence_accepts(sat_id, freq, system_filters, sat_filters, freq_filters) and any(self._has_valid_observation(values, idx) for idx in range(len(times))):
+                    freq_names.append(freq)
+                    sat_has_visible_data = True
+            if sat_has_visible_data:
+                visible_satellite_ids.append(sat_id)
+
+        if not freq_names:
+            raise ValueError('No valid frequency observations found in current RINEX data')
+
+        unique_freqs = sorted(set(freq_names))
+        cmap = plt.get_cmap('tab20')
+        color_map = {
+            'L1C': cmap(0),
+            'L2I': cmap(2),
+            'L5Q': cmap(4),
+            'L7Q': cmap(6),
+            'default': cmap(8),
+        }
+
+        fig_height = max(4.8, 0.24 * len(satellite_ids) + 1.4)
+        fig, ax = plt.subplots(figsize=(14, fig_height))
+
+        y_positions = {sat_id: idx for idx, sat_id in enumerate(visible_satellite_ids)}
+        all_valid_times = []
+
+        for sat_id in visible_satellite_ids:
+            y = y_positions[sat_id]
+            sat_data = obs.get(sat_id) or {}
+            for freq in unique_freqs:
+                if not self._frequency_sequence_accepts(sat_id, freq, system_filters, sat_filters, freq_filters):
+                    continue
+                freq_values = sat_data.get(freq)
+                if not freq_values:
+                    continue
+                times = freq_values.get('times', []) or []
+                valid_times = [times[idx] for idx in range(len(times)) if self._has_valid_observation(freq_values, idx)]
+                if not valid_times:
+                    continue
+                all_valid_times.extend(valid_times)
+
+                color = self._frequency_sequence_color(sat_id, freq, color_map)
+                label = self._frequency_sequence_legend_label(sat_id, freq)
+                y_vals = [y] * len(valid_times)
+                ax.plot(valid_times, y_vals, color=color, linewidth=0.8, alpha=0.35, label=label)
+                ax.scatter(valid_times, y_vals, color=color, s=10, alpha=0.9, edgecolors='none')
+
+        ax.set_yticks(list(y_positions.values()))
+        ax.set_yticklabels(visible_satellite_ids)
+        ax.set_xlabel('')
+        ax.set_ylabel('')
+        ax.set_title('Satellite Visibility by Frequency', pad=8)
+        ax.grid(True, axis='x', alpha=0.25)
+        ax.grid(True, axis='y', alpha=0.15)
+
+        if all_valid_times:
+            x_min = min(all_valid_times)
+            x_max = max(all_valid_times)
+            ax.set_xlim(x_min, x_max)
+            ax.margins(x=0, y=0)
+
+        if len(visible_satellite_ids) > 1:
+            ax.set_ylim(-0.35, len(visible_satellite_ids) - 0.65)
+        else:
+            ax.set_ylim(-0.5, 0.5)
+
+        ax.margins(y=0)
+
+        ax.xaxis.set_major_locator(mdates.AutoDateLocator(minticks=4, maxticks=10))
+        ax.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M'))
+        fig.autofmt_xdate(rotation=0, ha='center')
+
+        legend_items = {}
+        for sat_id in visible_satellite_ids:
+            sat_data = obs.get(sat_id) or {}
+            for freq in unique_freqs:
+                if not self._frequency_sequence_accepts(sat_id, freq, system_filters, sat_filters, freq_filters):
+                    continue
+                freq_values = sat_data.get(freq)
+                if not freq_values:
+                    continue
+                times = freq_values.get('times', []) or []
+                if not any(self._has_valid_observation(freq_values, idx) for idx in range(len(times))):
+                    continue
+                label = self._frequency_sequence_legend_label(sat_id, freq)
+                if label not in legend_items:
+                    legend_items[label] = self._frequency_sequence_color(sat_id, freq, color_map)
+
+        legend_handles = [
+            Line2D([0], [0], color=color, marker='o', linestyle='-', linewidth=2.2,
+                   markersize=7, markerfacecolor=color, markeredgecolor=color, label=label)
+            for label, color in legend_items.items()
+        ]
+        legend = ax.legend(
+            handles=legend_handles,
+            loc='upper left',
+            bbox_to_anchor=(1.01, 1.0),
+            frameon=True,
+            fontsize='small',
+        )
+        legend.set_draggable(True)
+
+        fig.subplots_adjust(left=0.08, right=0.76, top=0.92, bottom=0.08)
+
+        if MPLCURSORS_AVAILABLE and not save:
+            cursor = mplcursors.cursor(ax, hover=False)
+            cursor.connect(
+                'add',
+                lambda sel: sel.annotation.set(
+                    text=f'GPST: {sel.target[0]}\nPRN: {satellite_ids[int(round(sel.target[1]))] if 0 <= int(round(sel.target[1])) < len(satellite_ids) else "N/A"}',
+                    bbox=dict(boxstyle='round,pad=0.5', fc='yellow', alpha=0.8),
+                ),
+            )
+
+        if save:
+            path = self._save_fig(fig, 'satellite_frequency_sequence', output_dir)
+            return {'figure': None, 'path': path}
+        return {'figure': fig, 'path': None}
 
     def plot_raw_observations(self, data: Dict[str, Any], sat_id: str, save: bool = True, output_dir: Optional[str] = None) -> Dict[str, Any]:
         """Plot raw code/phase with phase aligned to code (mirrors original tool output)."""
@@ -612,7 +945,7 @@ class GNSSPlotter:
     def plot_cycle_slip_analysis(self, detection_result: Dict[str, Any], sat_id: str, 
                                  save: bool = True, output_dir: Optional[str] = None) -> Dict[str, Any]:
         """
-        绘制周跳探测分析图（MW + GF）
+        绘制周跳探测分析图（MW + GF + LLI）
         
         Args:
             detection_result: 单颗卫星的周跳探测结果
@@ -625,11 +958,12 @@ class GNSSPlotter:
         """
         mw_data = detection_result.get('mw', {})
         gf_data = detection_result.get('gf', {})
+        lli_data = detection_result.get('lli', {})
         freq_pair = detection_result.get('freq_pair', ('?', '?'))
         
-        # 创建两个子图
-        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10))
-        fig.suptitle(f'周跳探测 - {sat_id} ({freq_pair[0]}/{freq_pair[1]})', fontsize=14, fontweight='bold')
+        # 创建三个子图
+        fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(12, 13))
+        fig.suptitle(f'周跳探测 - {sat_id} ({freq_pair[0]}/{freq_pair[1]}) [MW/GF/LLI]', fontsize=14, fontweight='bold')
         
         # 子图(a): MW检验
         if 'delta_mw' in mw_data and 'epochs' in mw_data:
@@ -726,19 +1060,77 @@ class GNSSPlotter:
             ax2.text(0.5, 0.5, 'GF数据不可用', ha='center', va='center',
                     transform=ax2.transAxes, fontsize=12)
             ax2.set_title('(b) GF检验', fontsize=12, loc='left')
+
+        # 子图(c): LLI标识检验
+        if 'epochs' in lli_data and 'lock_loss_union' in lli_data:
+            epochs = lli_data.get('epochs', [])
+            lock_loss_union = lli_data.get('lock_loss_union', [])
+            half_cycle_union = lli_data.get('half_cycle_union', [])
+            lli_freqs = lli_data.get('lli_freqs', [])
+            bit0_by_freq = lli_data.get('bit0_by_freq', {})
+            events = lli_data.get('cycle_slips', [])
+            half_events = lli_data.get('half_cycle_events', [])
+
+            ax3.step(epochs, lock_loss_union, where='mid', color='purple', linewidth=1.8, label='LLI bit0 (Loss of lock)')
+            if len(epochs) == len(half_cycle_union):
+                ax3.step(epochs, half_cycle_union, where='mid', color='orange', linewidth=1.3, alpha=0.8, label='LLI bit1 (Half-cycle)')
+
+            # 绘制各频率 bit0 轨迹（多频并列）
+            if lli_freqs:
+                cmap = plt.get_cmap('tab10')
+                for idx, fn in enumerate(lli_freqs):
+                    bit0_vals = bit0_by_freq.get(fn, [])
+                    if len(bit0_vals) == len(epochs):
+                        ax3.plot(
+                            epochs,
+                            bit0_vals,
+                            color=cmap(idx % 10),
+                            alpha=0.35,
+                            linewidth=1.0,
+                            label=f'{fn} bit0'
+                        )
+
+            if events:
+                slip_epochs = [e['epoch'] for e in events]
+                slip_vals = [1] * len(slip_epochs)
+                ax3.scatter(slip_epochs, slip_vals, c='red', marker='x', s=90,
+                            linewidths=2, label='LLI周跳(bit0)', zorder=6)
+            if half_events:
+                he_epochs = [e['epoch'] for e in half_events]
+                he_vals = [1] * len(he_epochs)
+                ax3.scatter(he_epochs, he_vals, c='goldenrod', marker='o', s=38,
+                            linewidths=1.0, label='半周模糊(bit1)', zorder=5)
+
+            ax3.set_ylim(-0.1, 1.2)
+            ax3.set_yticks([0, 1])
+            ax3.set_xlabel('历元 (Epoch)', fontsize=11)
+            ax3.set_ylabel('LLI Flag', fontsize=11)
+            ax3.set_title('(c) LLI标识检验（bit0=周跳/失锁，bit1=半周模糊）', fontsize=12, loc='left')
+            ax3.grid(True, alpha=0.3)
+            ax3.legend(loc='best')
+        else:
+            ax3.text(0.5, 0.5, 'LLI数据不可用', ha='center', va='center',
+                    transform=ax3.transAxes, fontsize=12)
+            ax3.set_title('(c) LLI标识检验', fontsize=12, loc='left')
         
         plt.tight_layout()
 
         # 添加交互式数据点显示（点击数据点后用方向键切换）
         if MPLCURSORS_AVAILABLE and not save:
-            cursor = mplcursors.cursor([ax1, ax2])
+            cursor = mplcursors.cursor([ax1, ax2, ax3])
             def on_add(sel):
                 x, y = sel.target
                 if sel.artist.axes == ax1:
                     label_text = 'ΔMW'
-                else:
+                    unit = 'm'
+                elif sel.artist.axes == ax2:
                     label_text = 'ΔGF'
-                sel.annotation.set(text=f'历元: {x:.0f}\n{label_text}: {y:.3f} m\n\n点击后按←/→键\n(图表窗口需有焦点)',
+                    unit = 'm'
+                else:
+                    label_text = 'LLI'
+                    unit = ''
+                unit_suffix = f' {unit}' if unit else ''
+                sel.annotation.set(text=f'历元: {x:.0f}\n{label_text}: {y:.3f}{unit_suffix}\n\n点击后按←/→键\n(图表窗口需有焦点)',
                                   bbox=dict(boxstyle='round,pad=0.5', fc='yellow', alpha=0.8))
             cursor.connect("add", on_add)
         

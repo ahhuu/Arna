@@ -1,6 +1,6 @@
 """
 周跳探测模块
-实现 Melbourne-Wübbena (MW) 组合和 Geometry-Free (GF) 组合的周跳探测算法
+实现 Melbourne-Wübbena (MW)、Geometry-Free (GF) 组合以及 LLI 标识的周跳探测算法
 """
 from typing import Dict, Any, List, Tuple, Optional
 import numpy as np
@@ -8,7 +8,7 @@ from src.core.config import SPEED_OF_LIGHT, GNSS_FREQUENCIES
 
 
 class CycleSlipDetector:
-    """周跳探测器，实现 MW 和 GF 组合算法"""
+    """周跳探测器，实现 MW、GF 和 LLI 标识算法"""
     
     def __init__(self, mw_threshold_sigma: float = 4.0, gf_threshold: float = 0.4,
                  gf_k_sigma: float = 4.0, delta_i_max: float = 0.4,
@@ -182,14 +182,16 @@ class CycleSlipDetector:
                 results[sat_id] = {'error': 'Frequency separation too small', 'f1': f1, 'f2': f2}
                 continue
             
-            # 执行MW和GF探测
+            # 执行MW/GF/LLI探测
             mw_result = self._detect_mw(sat_data, freq1, freq2, f1, f2, lambda1, lambda2)
             gf_result = self._detect_gf(sat_data, freq1, freq2, lambda1, lambda2)
+            lli_result = self._detect_lli(sat_data)
             
             results[sat_id] = {
                 'freq_pair': (freq1, freq2),
                 'mw': mw_result,
                 'gf': gf_result,
+                'lli': lli_result,
                 'frequencies': (f1, f2),
                 'wavelengths': (lambda1, lambda2)
             }
@@ -426,6 +428,102 @@ class CycleSlipDetector:
             'threshold_mode': 'custom' if self.use_custom_threshold else 'dynamic',
             'threshold_value': self.custom_gf_threshold if self.use_custom_threshold else None
         }
+
+    def _detect_lli(self, sat_data: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        基于 LLI 标识检测周跳事件。
+
+        规则（与转换器定义一致）：
+        - bit0 (=1): RESET 或 CYCLE_SLIP -> 记为 LLI周跳事件
+        - bit1 (=2): HALF_CYCLE_REPORTED 且未 RESOLVED -> 记为半周模糊事件（非周跳）
+        """
+        lli_freqs = []
+        for freq_name, freq_data in sat_data.items():
+            lli_list = freq_data.get('phase_lli', []) if isinstance(freq_data, dict) else []
+            if lli_list:
+                lli_freqs.append(freq_name)
+
+        lli_freqs = sorted(lli_freqs)
+        if not lli_freqs:
+            return {'error': 'No LLI data available'}
+
+        n = 0
+        for fn in lli_freqs:
+            fd = sat_data.get(fn, {})
+            n = max(n, len(fd.get('phase_lli', []) or []), len(fd.get('times', []) or []))
+        if n == 0:
+            return {'error': 'No LLI data available'}
+
+        cycle_slip_events = []
+        half_cycle_events = []
+        epochs = []
+        lli_raw_by_freq = {fn: [] for fn in lli_freqs}
+        bit0_by_freq = {fn: [] for fn in lli_freqs}
+        bit1_by_freq = {fn: [] for fn in lli_freqs}
+        lock_loss_union = []
+        half_cycle_union = []
+
+        for i in range(n):
+            t = None
+            lli_by_freq = {}
+            lock_loss_any = False
+            half_cycle_any = False
+
+            for fn in lli_freqs:
+                fd = sat_data.get(fn, {})
+                lli_list = fd.get('phase_lli', []) or []
+                times = fd.get('times', []) or []
+                raw = int(lli_list[i]) if i < len(lli_list) and lli_list[i] is not None else 0
+                lli_by_freq[fn] = raw
+                lli_raw_by_freq[fn].append(raw)
+
+                b0 = 1 if (raw & 1) != 0 else 0
+                b1 = 1 if (raw & 2) != 0 else 0
+                bit0_by_freq[fn].append(b0)
+                bit1_by_freq[fn].append(b1)
+                lock_loss_any = lock_loss_any or (b0 == 1)
+                half_cycle_any = half_cycle_any or (b1 == 1)
+
+                if t is None and i < len(times):
+                    t = times[i]
+
+            e = i + 1
+            epochs.append(e)
+            lock_loss_flag = 1 if lock_loss_any else 0
+            half_cycle_flag = 1 if half_cycle_any else 0
+            lock_loss_union.append(lock_loss_flag)
+            half_cycle_union.append(half_cycle_flag)
+            lli_values_str = ';'.join([f"{fn}:{lli_by_freq.get(fn, 0)}" for fn in lli_freqs])
+
+            if lock_loss_flag:
+                cycle_slip_events.append({
+                    'epoch': e,
+                    'index': i,
+                    'time': t,
+                    'lli_by_freq': lli_by_freq.copy(),
+                    'lli_values_str': lli_values_str
+                })
+
+            if half_cycle_flag:
+                half_cycle_events.append({
+                    'epoch': e,
+                    'index': i,
+                    'time': t,
+                    'lli_by_freq': lli_by_freq.copy(),
+                    'lli_values_str': lli_values_str
+                })
+
+        return {
+            'epochs': epochs,
+            'lli_freqs': lli_freqs,
+            'lli_raw_by_freq': lli_raw_by_freq,
+            'bit0_by_freq': bit0_by_freq,
+            'bit1_by_freq': bit1_by_freq,
+            'lock_loss_union': lock_loss_union,
+            'half_cycle_union': half_cycle_union,
+            'cycle_slips': cycle_slip_events,
+            'half_cycle_events': half_cycle_events
+        }
     
     def format_detection_summary(self, detection_results: Dict[str, Any]) -> str:
         """
@@ -444,14 +542,17 @@ class CycleSlipDetector:
         for sat_id, result in detection_results.items():
             mw = result.get('mw', {})
             gf = result.get('gf', {})
+            lli = result.get('lli', {})
             
             mw_slips = len(mw.get('cycle_slips', []))
             mw_outliers = len(mw.get('outliers', []))
             gf_slips = len(gf.get('cycle_slips', []))
+            lli_slips = len(lli.get('cycle_slips', []))
+            lli_half = len(lli.get('half_cycle_events', []))
             
-            if mw_slips > 0 or gf_slips > 0:
+            if mw_slips > 0 or gf_slips > 0 or lli_slips > 0 or lli_half > 0:
                 affected_satellites.append(sat_id)
-                total_cycle_slips += mw_slips + gf_slips
+                total_cycle_slips += mw_slips + gf_slips + lli_slips
                 total_outliers += mw_outliers
         
         summary = f"周跳探测摘要:\n"

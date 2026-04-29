@@ -19,6 +19,20 @@ class CycleSlipLogger:
         """
         self.output_dir = output_dir or os.getcwd()
         os.makedirs(self.output_dir, exist_ok=True)
+
+    @staticmethod
+    def _format_lli_values(event: Dict[str, Any]) -> str:
+        """Format LLI values as 'L1C:3;L5Q:2;L7Q:0'."""
+        if isinstance(event.get('lli_values_str'), str) and event.get('lli_values_str'):
+            return event['lli_values_str']
+        lli_by_freq = event.get('lli_by_freq')
+        if isinstance(lli_by_freq, dict) and lli_by_freq:
+            parts = [f"{k}:{lli_by_freq[k]}" for k in sorted(lli_by_freq.keys())]
+            return ';'.join(parts)
+        # backward compatibility
+        lli_v1 = event.get('lli_freq1')
+        lli_v2 = event.get('lli_freq2')
+        return f"{lli_v1 if lli_v1 is not None else 0}/{lli_v2 if lli_v2 is not None else 0}"
     
     def save_cycle_slip_log(self, detection_results: Dict[str, Any], 
                            filename: Optional[str] = None) -> str:
@@ -56,6 +70,8 @@ class CycleSlipLogger:
             total_satellites = len(detection_results)
             total_mw_slips = 0
             total_gf_slips = 0
+            total_lli_slips = 0
+            total_lli_half_cycles = 0
             total_outliers = 0
             affected_satellites = []
             total_observations = 0
@@ -63,22 +79,27 @@ class CycleSlipLogger:
             for sat_id, result in detection_results.items():
                 mw = result.get('mw', {})
                 gf = result.get('gf', {})
+                lli = result.get('lli', {})
                 
                 mw_slips = len(mw.get('cycle_slips', []))
                 gf_slips = len(gf.get('cycle_slips', []))
+                lli_slips = len(lli.get('cycle_slips', []))
+                lli_half_cycles = len(lli.get('half_cycle_events', []))
                 mw_outliers = len(mw.get('outliers', []))
                 
                 total_mw_slips += mw_slips
                 total_gf_slips += gf_slips
+                total_lli_slips += lli_slips
+                total_lli_half_cycles += lli_half_cycles
                 total_outliers += mw_outliers
                 
-                if mw_slips > 0 or gf_slips > 0:
+                if mw_slips > 0 or gf_slips > 0 or lli_slips > 0:
                     affected_satellites.append(sat_id)
                 
                 # 统计观测值总数
                 total_observations += len(mw.get('epochs', []))
             
-            total_cycle_slips = total_mw_slips + total_gf_slips
+            total_cycle_slips = total_mw_slips + total_gf_slips + total_lli_slips
             
             # 写入统计摘要
             f.write("-" * 80 + "\n")
@@ -88,6 +109,8 @@ class CycleSlipLogger:
             f.write(f"总历元数: {total_observations}\n")
             f.write(f"MW周跳检测数: {total_mw_slips}\n")
             f.write(f"GF周跳检测数: {total_gf_slips}\n")
+            f.write(f"LLI周跳检测数(bit0): {total_lli_slips}\n")
+            f.write(f"LLI半周模糊事件(bit1): {total_lli_half_cycles}\n")
             f.write(f"周跳总数: {total_cycle_slips}\n")
             f.write(f"粗差检测数: {total_outliers}\n")
             f.write(f"受影响卫星列表: {', '.join(affected_satellites) if affected_satellites else '无'}\n")
@@ -111,6 +134,7 @@ class CycleSlipLogger:
                 result = detection_results[sat_id]
                 mw = result.get('mw', {})
                 gf = result.get('gf', {})
+                lli = result.get('lli', {})
                 
                 # MW周跳
                 for slip in mw.get('cycle_slips', []):
@@ -132,6 +156,18 @@ class CycleSlipLogger:
                     delta = slip['delta']
                     threshold = slip['threshold']
                     f.write(f"{epoch:>8d} {sat_id:>8} {'GF':>8} {delta:>12.4f} {threshold:>12.4f} {'周跳':>12}\n")
+
+                # LLI周跳（bit0）
+                for slip in lli.get('cycle_slips', []):
+                    epoch = slip['epoch']
+                    lli_desc = self._format_lli_values(slip)
+                    f.write(f"{epoch:>8d} {sat_id:>8} {'LLI':>8} {lli_desc:>12} {'bit0':>12} {'周跳':>12}\n")
+
+                # LLI半周模糊（bit1）
+                for evt in lli.get('half_cycle_events', []):
+                    epoch = evt['epoch']
+                    lli_desc = self._format_lli_values(evt)
+                    f.write(f"{epoch:>8d} {sat_id:>8} {'LLI':>8} {lli_desc:>12} {'bit1':>12} {'半周模糊':>12}\n")
             
             f.write("-" * 80 + "\n")
             f.write("\n")
@@ -145,6 +181,7 @@ class CycleSlipLogger:
                 result = detection_results[sat_id]
                 mw = result.get('mw', {})
                 gf = result.get('gf', {})
+                lli = result.get('lli', {})
                 freq_pair = result.get('freq_pair', ('?', '?'))
                 
                 f.write(f"\n卫星: {sat_id}\n")
@@ -168,6 +205,13 @@ class CycleSlipLogger:
                     f.write(f"    阈值: {gf['threshold']:.4f} m\n")
                 if 'sigma_gf' in gf:
                     f.write(f"    GF标准差: {gf['sigma_gf']:.4f} m\n")
+
+                # LLI统计
+                lli_slips = len(lli.get('cycle_slips', []))
+                lli_half_cycles = len(lli.get('half_cycle_events', []))
+                f.write(f"  LLI检测:\n")
+                f.write(f"    周跳数(bit0): {lli_slips}\n")
+                f.write(f"    半周模糊(bit1): {lli_half_cycles}\n")
                 
                 f.write("-" * 80 + "\n")
         
@@ -200,6 +244,7 @@ class CycleSlipLogger:
                 result = detection_results[sat_id]
                 mw = result.get('mw', {})
                 gf = result.get('gf', {})
+                lli = result.get('lli', {})
                 
                 # MW周跳
                 for slip in mw.get('cycle_slips', []):
@@ -212,6 +257,16 @@ class CycleSlipLogger:
                 # GF周跳
                 for slip in gf.get('cycle_slips', []):
                     f.write(f"{sat_id},{slip['epoch']},GF,{slip['delta']:.4f},{slip['threshold']:.4f},Cycle_Slip\n")
+
+                # LLI周跳（bit0）
+                for slip in lli.get('cycle_slips', []):
+                    lli_desc = self._format_lli_values(slip)
+                    f.write(f"{sat_id},{slip['epoch']},LLI,{lli_desc},bit0,Cycle_Slip\n")
+
+                # LLI半周模糊（bit1）
+                for evt in lli.get('half_cycle_events', []):
+                    lli_desc = self._format_lli_values(evt)
+                    f.write(f"{sat_id},{evt['epoch']},LLI,{lli_desc},bit1,Half_Cycle_Ambiguity\n")
         
         return csv_path    
     def _extract_threshold_info(self, detection_results: Dict[str, Any]) -> str:

@@ -16,3 +16,5 @@ tools/conversion_tools/gnss_converter.log
 tools/conversion_tools/main.cpp
 tools/conversion_tools/RINEX改进.md
 tools/conversion_tools/RinexLogger.java
+gnss_converter.log
+Android_GNSS_Analysis/tools/conversion_tools/gnss_converter.log

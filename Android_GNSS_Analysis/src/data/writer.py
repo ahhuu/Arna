@@ -2,6 +2,7 @@ from typing import Dict, Any, Optional, Tuple
 from collections import defaultdict
 import os
 import datetime
+import re
 import pandas as pd
 import numpy as np
 
@@ -12,6 +13,43 @@ class RinexWriter:
     Methods try to mirror the behavior of the original Analyzer implementations
     but operate as pure functions that accept inputs and return results.
     """
+    _PHONE_PHASE_LLI_RE = re.compile(r'^([+-]?\d+\.\d{3})([23])$')
+
+    @classmethod
+    def _extract_phase_and_lli_from_segment(cls, field_segment: str) -> Tuple[Optional[float], Optional[int], str]:
+        """Extract phase value and LLI from a 16-char RINEX observation segment."""
+        field = (field_segment or '').ljust(16)[:16]
+        value_str = field[:14].strip()
+        standard_lli = int(field[14]) if field[14].isdigit() else None
+        ssi_char = field[15] if len(field) >= 16 else ' '
+
+        phase_value = None
+        mobile_lli = None
+        if value_str:
+            m = cls._PHONE_PHASE_LLI_RE.match(value_str)
+            if m:
+                try:
+                    phase_value = float(m.group(1))
+                    mobile_lli = int(m.group(2))
+                except Exception:
+                    phase_value = None
+                    mobile_lli = None
+            else:
+                try:
+                    phase_value = float(value_str)
+                except Exception:
+                    phase_value = None
+
+        lli = standard_lli if standard_lli is not None else mobile_lli
+        return phase_value, lli, ssi_char
+
+    @staticmethod
+    def _format_phase_segment(phase_cycle: float, lli: Optional[int], ssi_char: str = ' ') -> str:
+        """Format phase with RINEX 16-char field: 14.3f + LLI + SSI."""
+        phase_part = f"{phase_cycle:14.3f}"
+        lli_char = str(int(lli))[-1] if lli is not None else ' '
+        ssi_out = ssi_char if isinstance(ssi_char, str) and len(ssi_char) == 1 else ' '
+        return f"{phase_part}{lli_char}{ssi_out}"
 
     def write_corrected_rinex(self,
                               original_path: str,
@@ -170,11 +208,8 @@ class RinexWriter:
                     end_pos = start_pos + 16
                     if end_pos > len(modified_line):
                         continue
-                    original_field = original_line[start_pos:end_pos].strip()
-                    try:
-                        original_phase_cycle = float(original_field) if original_field else None
-                    except Exception:
-                        original_phase_cycle = None
+                    original_field_segment = original_line[start_pos:end_pos]
+                    original_phase_cycle, original_lli, original_ssi = self._extract_phase_and_lli_from_segment(original_field_segment)
                     if original_phase_cycle is None:
                         # If original empty, skip
                         continue
@@ -192,8 +227,8 @@ class RinexWriter:
 
                     corrected_phase_m2 = original_phase_m + correction_amount
                     corrected_phase_cycle2 = corrected_phase_m2 / wavelength
-                    formatted_phase = f"{corrected_phase_cycle2:14.3f}"
-                    modified_line[start_pos:end_pos] = formatted_phase.rjust(16)
+                    formatted_phase = self._format_phase_segment(corrected_phase_cycle2, original_lli, original_ssi)
+                    modified_line[start_pos:end_pos] = formatted_phase
                     output_lines[sat_line_idx] = ''.join(modified_line)
 
                     modification_info = {
@@ -205,7 +240,8 @@ class RinexWriter:
                         'corrected_phase_m': corrected_phase_m2,
                         'wavelength': wavelength,
                         'correction_amount': correction_amount,
-                        'formatted_phase': formatted_phase
+                        'formatted_phase': formatted_phase,
+                        'lli': original_lli
                     }
                     modification_details[sat_id].append(modification_info)
                     total_modifications += 1
@@ -256,6 +292,18 @@ class RinexWriter:
         # parse epochs and obs types similar to analyzer
         epoch_timestamps = {}
         current_epoch = 0
+        # Build fast lookup indexes to avoid repeated full-file scans on large RINEX.
+        epoch_sat_line_indices = defaultdict(dict)
+
+        def _ts_key(ts: Optional[pd.Timestamp]) -> Optional[int]:
+            if ts is None:
+                return None
+            try:
+                # millisecond-level key, consistent with existing 0.001s matching tolerance
+                return int(ts.value // 1_000_000)
+            except Exception:
+                return None
+
         for line in lines:
             if line.startswith('>'):
                 current_epoch += 1
@@ -270,6 +318,17 @@ class RinexWriter:
                         )
                     except Exception:
                         epoch_timestamps[current_epoch] = None
+        # Build epoch -> satellite line index in one pass.
+        current_epoch_idx = 0
+        for line_idx, line in enumerate(lines):
+            if line.startswith('>'):
+                current_epoch_idx += 1
+                continue
+            if current_epoch_idx <= 0:
+                continue
+            if len(line) >= 3 and line[0].isalpha() and line[1:3].strip():
+                sat_id = f"{line[0]}{line[1:3].strip().zfill(2)}"
+                epoch_sat_line_indices[current_epoch_idx][sat_id] = line_idx
 
         system_obs_info = {}
         header_end_idx = next((i for i, line in enumerate(lines) if 'END OF HEADER' in line), -1)
@@ -308,8 +367,9 @@ class RinexWriter:
         outlier_epochs = defaultdict(lambda: defaultdict(list))
         outlier_details = defaultdict(list)
         
-        # Build reverse mapping: timestamp -> epoch_idx for precise matching
-        timestamp_to_epoch = {ts: idx for idx, ts in epoch_timestamps.items()}
+        # Build reverse mappings: timestamp -> epoch_idx for precise/fuzzy matching
+        timestamp_to_epoch = {ts: idx for idx, ts in epoch_timestamps.items() if ts is not None}
+        timestamp_key_to_epoch = {_ts_key(ts): idx for idx, ts in epoch_timestamps.items() if _ts_key(ts) is not None}
 
         for sat_id, freq_data in double_diffs.items():
             for freq, dd_data in freq_data.items():
@@ -395,13 +455,9 @@ class RinexWriter:
                             # Find matching global epoch by timestamp
                             epoch_idx = None
                             if timestamp_obj is not None:
-                                # epoch_timestamps now contains pd.Timestamp objects directly
-                                for e_idx, e_ts_obj in epoch_timestamps.items():
-                                    if e_ts_obj is not None:
-                                        # Compare with tolerance of 0.001 seconds
-                                        if abs((timestamp_obj - e_ts_obj).total_seconds()) < 0.001:
-                                            epoch_idx = e_idx
-                                            break
+                                epoch_idx = timestamp_to_epoch.get(timestamp_obj)
+                                if epoch_idx is None:
+                                    epoch_idx = timestamp_key_to_epoch.get(_ts_key(timestamp_obj))
                             
                             if epoch_idx is None:
                                 continue
@@ -448,35 +504,12 @@ class RinexWriter:
             for epoch_idx, obs_freq_list in epoch_obs_map.items():
                 target_ts = epoch_timestamps.get(epoch_idx)
                 timestamp_str = str(target_ts) if target_ts else f"未知时间戳(历元{epoch_idx})"
-                # find epoch start by matching timestamp object
-                epoch_start = -1
-                for i, line in enumerate(lines):
-                    if line.startswith('>'):
-                        parts = line[1:].split()
-                        if len(parts) >= 6:
-                            try:
-                                y, mo, d = int(parts[0]), int(parts[1]), int(parts[2])
-                                h, mi, s = int(parts[3]), int(parts[4]), float(parts[5])
-                                line_ts = pd.Timestamp(year=y, month=mo, day=d, hour=h, minute=mi,
-                                                       second=int(s), microsecond=int((s - int(s)) * 1000000))
-                                if target_ts and abs((target_ts - line_ts).total_seconds()) < 0.001:
-                                    epoch_start = i
-                                    break
-                            except Exception:
-                                continue
-                if epoch_start < 0:
-                    skip_reasons[sat_id]['epoch_not_found'] += 1
-                    continue
-                sat_line_idx = -1
-                j = epoch_start + 1
-                while j < len(lines) and not lines[j].startswith('>'):
-                    line = lines[j]
-                    if len(line) >= 3 and line[0] == sat_system and line[1:3].strip().zfill(2) == sat_prn:
-                        sat_line_idx = j
-                        break
-                    j += 1
+                sat_line_idx = epoch_sat_line_indices.get(epoch_idx, {}).get(sat_id, -1)
                 if sat_line_idx < 0:
-                    skip_reasons[sat_id]['sat_line_not_found'] += 1
+                    if epoch_idx not in epoch_sat_line_indices:
+                        skip_reasons[sat_id]['epoch_not_found'] += 1
+                    else:
+                        skip_reasons[sat_id]['sat_line_not_found'] += 1
                     continue
                 original_line = lines[sat_line_idx]
                 modified_line = list(original_line)
@@ -814,6 +847,8 @@ class RinexWriter:
                     epoch_idx = detail.get('epoch_idx')
                     predicted_phase_cycle = detail.get('predicted_phase_cycle')
                     epoch_time = detail.get('time')
+                    if predicted_phase_cycle is None:
+                        continue
                     # find epoch index (0-based) in file using epoch_indices
                     current_epoch = -1
                     for line_idx, line in enumerate(output_lines):
@@ -830,18 +865,21 @@ class RinexWriter:
                                         line = sat_line.rstrip('\n')
                                         if len(line) < 3:
                                             break
-                                        field_start = 3 + phase_field_idx * 16 + 2
-                                        field_end = field_start + 14
+                                        field_start = 3 + phase_field_idx * 16
+                                        field_end = field_start + 16
                                         if len(line) < field_end:
-                                            line = line.ljust(field_end + 2)
-                                        phase_str = f"{predicted_phase_cycle:14.3f}"
-                                        modified_line = line[:field_start] + phase_str + line[field_end:]
-                                        output_lines[j] = modified_line + '\n'
+                                            line = line.ljust(field_end)
+                                        original_segment = line[field_start:field_end]
+                                        _, original_lli, original_ssi = self._extract_phase_and_lli_from_segment(original_segment)
+                                        phase_segment = self._format_phase_segment(predicted_phase_cycle, original_lli, original_ssi)
+                                        modified_line = line[:field_start] + phase_segment + line[field_end:]
+                                        output_lines[j] = modified_line
                                         mod_detail = {
                                             'sat_id': sat_id,
                                             'freq': freq,
                                             'epoch_idx': epoch_idx,
-                                            'predicted_phase_cycle': predicted_phase_cycle
+                                            'predicted_phase_cycle': predicted_phase_cycle,
+                                            'lli': original_lli
                                         }
                                         modification_details.append(mod_detail)
                                         total_modifications += 1
@@ -854,7 +892,7 @@ class RinexWriter:
         dirpath = os.path.dirname(output_path) or '.'
         os.makedirs(dirpath, exist_ok=True)
         with open(output_path, 'w', encoding='utf-8') as f:
-            f.writelines(output_lines)
+            f.writelines([line if line.endswith('\n') else line + '\n' for line in output_lines])
 
         return {'output_path': output_path, 'modification_details': modification_details, 'total_modifications': total_modifications, 'modified_satellites': list(modified_satellites)}
 
@@ -979,7 +1017,7 @@ class RinexWriter:
         dirpath = os.path.dirname(output_path) or '.'
         os.makedirs(dirpath, exist_ok=True)
         with open(output_path, 'w', encoding='utf-8') as f:
-            f.writelines(output_lines)
+            f.writelines([line if line.endswith('\n') else line + '\n' for line in output_lines])
 
         return {'output_path': output_path, 'modification_details': modification_details, 'total_modifications': total_modifications, 'modified_satellites': list(modified_satellites)}
 

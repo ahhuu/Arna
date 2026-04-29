@@ -20,6 +20,9 @@ class VisualizationWindow:
     def plot_raw(self, sat_id: str, save: bool = True, output_dir: Optional[str] = None):
         return self.plotter.plot_raw_observations({'observations_meters': self.context.observations_meters}, sat_id, save=save, output_dir=output_dir)
 
+    def plot_satellite_frequency_sequence(self, save: bool = True, output_dir: Optional[str] = None):
+        return self.plotter.plot_satellite_frequency_sequence({'observations_meters': self.context.observations_meters}, save=save, output_dir=output_dir)
+
     def plot_derivative(self, sat_id: str, freq: str, save: bool = True, output_dir: Optional[str] = None):
         # expecting derivatives to be stored in results or computed on-the-fly
         derivatives = self.context.results.get('observable_derivatives') or {}
@@ -105,6 +108,8 @@ class VisualizationWindow:
         chart_frame.pack(fill=tk.X, pady=8)
         chart_types = [
             ('原始观测', 'raw_observations'),
+            ('卫星-频点序列', 'sat_freq_sequence'),
+            ('卫星数量', 'satellite_count'),
             ('观测值一阶差分', 'derivatives'),
             ('伪距相位差值之差', 'code_phase_diffs'),
             ('伪距相位原始差值', 'code_phase_diff_raw'),
@@ -113,7 +118,7 @@ class VisualizationWindow:
             ('ISB分析', 'isb_analysis'),
             ('接收机CMC', 'receiver_cmc'),
             ('无电离层组合CMC', 'ionofree_cmc'),
-            ('周跳探测分析 (MW & GF)', 'cycle_slip_detection'),
+            ('周跳探测分析 (MW & GF & LLI)', 'cycle_slip_detection'),
             ('伪距频间偏差与ISD验证', 'inter_freq_bias')
         ]
         chart_var = tk.StringVar(value='raw_observations')
@@ -125,10 +130,6 @@ class VisualizationWindow:
             r = i // 2
             c = i % 2
             ttk.Radiobutton(grid_frame, text=txt, variable=chart_var, value=val).grid(row=r, column=c, sticky='w', padx=10, pady=5)
-        
-        # 周跳探测日志选项
-        save_log_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(chart_frame, text='保存周跳详细日志', variable=save_log_var).pack(anchor='w', pady=5)
         
         # 周跳探测频率组合选择（使用GNSS_FREQUENCIES动态生成）
         freq_pair_frame = ttk.Frame(chart_frame)
@@ -166,15 +167,35 @@ class VisualizationWindow:
         freq_pair_var.set(cycleslip_freq_options[0])
         freq_pair_combo.pack(side=tk.LEFT, padx=5)
 
-        # 切换图表类型时动态更新频率组合下拉框选项
+        # 切换图表类型时动态更新参数区显示状态
         def _on_chart_type_changed(*_args):
-            if chart_var.get() == 'ionofree_cmc':
+            current_type = chart_var.get()
+
+            if current_type == 'ionofree_cmc':
                 sys_code = sat_system_var.get() or ''
                 opts = _get_ionofree_options_for_system(sys_code)
                 freq_pair_combo['values'] = opts
             else:
                 freq_pair_combo['values'] = cycleslip_freq_options
             freq_pair_var.set('自动选择')
+
+            if current_type in ('ionofree_cmc', 'cycle_slip_detection', 'inter_freq_bias'):
+                if not freq_pair_frame.winfo_ismapped():
+                    freq_pair_frame.pack(fill=tk.X, pady=5)
+            else:
+                freq_pair_frame.pack_forget()
+
+            if current_type == 'cycle_slip_detection':
+                if not threshold_frame.winfo_ismapped():
+                    threshold_frame.pack(fill=tk.X, pady=5)
+            else:
+                threshold_frame.pack_forget()
+
+            if current_type in ('sat_freq_sequence', 'satellite_count'):
+                if not sequence_filter_frame.winfo_ismapped():
+                    sequence_filter_frame.pack(fill=tk.X, pady=(8, 0))
+            else:
+                sequence_filter_frame.pack_forget()
         chart_var.trace_add('write', _on_chart_type_changed)
         
         # 周跳探测阈值设置
@@ -240,6 +261,90 @@ class VisualizationWindow:
         ttk.Label(combo_frame, text='频率:').pack(side=tk.LEFT)
         freq_combo = ttk.Combobox(combo_frame, textvariable=freq_var, width=10, state="readonly")
         freq_combo.pack(side=tk.LEFT, padx=5)
+
+        sequence_filter_frame = ttk.Frame(sat_frame)
+        ttk.Label(sequence_filter_frame, text='数据过滤:').pack(side=tk.LEFT)
+        sequence_buttons_frame = ttk.Frame(sequence_filter_frame)
+        sequence_buttons_frame.pack(side=tk.LEFT, padx=6)
+
+        def _build_dropdown_group(parent, title):
+            button_label = tk.StringVar(value=title)
+            button = tk.Menubutton(parent, textvariable=button_label, relief='raised', direction='below')
+            menu = tk.Menu(button, tearoff=0)
+            button.configure(menu=menu)
+            button.pack(side=tk.LEFT, padx=4)
+
+            state_map = {'vars': {}, 'menu': menu, 'label': button_label, 'title': title}
+
+            def _update_button_label():
+                values = list(state_map['vars'].values())
+                total = len(values)
+                selected = sum(1 for var in values if var.get())
+                if total == 0:
+                    button_label.set(title)
+                    return
+                elif selected == total:
+                    button_label.set(f'{title}(全部)')
+                elif selected == 0:
+                    button_label.set(f'{title}(无)')
+                else:
+                    button_label.set(f'{title}({selected}/{total})')
+
+                menu.entryconfig(0, label='清空' if selected == total else '全选')
+
+            def _toggle_all():
+                values = list(state_map['vars'].values())
+                if not values:
+                    return
+                all_checked = all(var.get() for var in values)
+                new_state = not all_checked
+                for var in values:
+                    var.set(new_state)
+                _update_button_label()
+
+            state_map['toggle_all'] = _toggle_all
+            state_map['update_button_label'] = _update_button_label
+            return state_map
+
+        sequence_group_widgets = {
+            'systems': _build_dropdown_group(sequence_buttons_frame, '系统'),
+            'sats': _build_dropdown_group(sequence_buttons_frame, '卫星'),
+            'freqs': _build_dropdown_group(sequence_buttons_frame, '频点'),
+        }
+
+        def _selected_values(kind: str):
+            group = sequence_group_widgets[kind]
+            return [key for key, var in group['vars'].items() if var.get()]
+
+        def _populate_group(kind: str, values):
+            group = sequence_group_widgets[kind]
+            menu = group['menu']
+            menu.delete(0, tk.END)
+            group['vars'].clear()
+
+            values = sorted(values)
+            if not values:
+                menu.add_command(label='当前无可用观测数据', state='disabled')
+            else:
+                menu.add_command(label='全选', command=group['toggle_all'])
+                menu.add_separator()
+                for value in values:
+                    var = tk.BooleanVar(value=True)
+                    group['vars'][value] = var
+                    menu.add_checkbutton(label=value, variable=var, command=group['update_button_label'])
+
+            group['update_button_label']()
+
+        def _refresh_sequence_filter_values():
+            obs = self.context.observations_meters or {}
+            systems = sorted({sat_id[0] for sat_id in obs.keys() if sat_id})
+            sats = sorted(obs.keys())
+            freqs = sorted({freq for sat_freqs in obs.values() for freq in sat_freqs.keys()})
+            _populate_group('systems', systems)
+            _populate_group('sats', sats)
+            _populate_group('freqs', freqs)
+
+        _on_chart_type_changed()
 
         # progress
         progress_frame = ttk.LabelFrame(main_frame, text='处理进度', padding=10)
@@ -329,6 +434,7 @@ class VisualizationWindow:
                     freq_combo['values'] = freqs
                     if freqs:
                         freq_var.set(freqs[0])
+                _refresh_sequence_filter_values()
                 status_var.set('文件读取完成')
             except Exception as e:
                 messagebox.showerror('错误', f'加载卫星信息失败: {e}')
@@ -498,6 +604,13 @@ class VisualizationWindow:
             if 'epoch_double_diffs' not in self.context.results:
                 self.context.results['epoch_double_diffs'] = mc.calculate_epoch_double_differences(inputs)
 
+        def _sequence_plot_filters():
+            return {
+                'system_filters': _selected_values('systems'),
+                'sat_filters': _selected_values('sats'),
+                'freq_filters': _selected_values('freqs'),
+            }
+
         def gen_chart():
             chart_type = chart_var.get()
             sat = sat_prn_var.get()
@@ -516,7 +629,6 @@ class VisualizationWindow:
                     if 'receiver_cmc' not in self.context.results:
                         mc = MetricCalculator()
                         self.context.results['receiver_cmc'] = mc.calculate_receiver_cmc({
-                            'receiver_observations': self.context.receiver_observations,
                             'receiver_frequencies': self.context.results.get('receiver_frequencies'),
                             'receiver_wavelengths': self.context.results.get('receiver_wavelengths')
                         })
@@ -652,14 +764,6 @@ class VisualizationWindow:
                         cycleslip_dir = os.path.join('results', 'cycleslips')
                     os.makedirs(cycleslip_dir, exist_ok=True)
                     
-                    # 如果选中保存日志
-                    if save_log_var.get():
-                        logger = CycleSlipLogger(output_dir=cycleslip_dir)
-                        log_path = logger.save_cycle_slip_log(detection_results)
-                        csv_path = logger.save_cycle_slip_csv(detection_results)
-                        status_var.set(f'日志已保存: {log_path}')
-                        messagebox.showinfo('日志保存', f'周跳探测日志已保存:\n{log_path}\n{csv_path}')
-                    
                     # 检查选中的卫星是否有结果
                     if sat not in detection_results:
                         available_sats = list(detection_results.keys())
@@ -744,6 +848,10 @@ class VisualizationWindow:
                     
                     elif chart_type == 'raw_observations':
                         out = self.plotter.plot_raw_observations({'observations_meters': self.context.observations_meters}, sat, save=False)
+                    elif chart_type == 'sat_freq_sequence':
+                        out = self.plotter.plot_satellite_frequency_sequence({'observations_meters': self.context.observations_meters}, save=False, **_sequence_plot_filters())
+                    elif chart_type == 'satellite_count':
+                        out = self.plotter.plot_satellite_count({'observations_meters': self.context.observations_meters}, save=False, **_sequence_plot_filters())
                     else:
                         pre_calculate_metrics()
                         if chart_type == 'derivatives':
@@ -807,7 +915,30 @@ class VisualizationWindow:
                  for sat in sats:
                      self.plotter.plot_raw_observations({'observations_meters': self.context.observations_meters}, sat, save=True, output_dir=raw_dir)
                      count += 1
-                     
+                 
+                 # Satellite frequency sequence
+                 seq_dir = os.path.join(project_dir, 'Satellite_frequency_sequence')
+                 if not os.path.exists(seq_dir): os.makedirs(seq_dir)
+                 try:
+                     self.plotter.plot_satellite_frequency_sequence(
+                         {'observations_meters': self.context.observations_meters},
+                         save=True,
+                         output_dir=seq_dir,
+                         **_sequence_plot_filters(),
+                     )
+                     count += 1
+                 except Exception:
+                     pass
+
+                 # Satellite count
+                 count_dir = os.path.join(project_dir, 'Satellite_count')
+                 if not os.path.exists(count_dir): os.makedirs(count_dir)
+                 try:
+                     self.plotter.plot_satellite_count({'observations_meters': self.context.observations_meters}, save=True, output_dir=count_dir)
+                     count += 1
+                 except Exception:
+                     pass
+                 
                  status_var.set(f'批量保存完成: {count} 张')
                  messagebox.showinfo('完成', f'批量保存完成\n保存路径: {project_dir}')
              except Exception as e:
@@ -836,6 +967,8 @@ class VisualizationWindow:
              # Map chart_type to Folder Name
              folder_map = {
                  'raw_observations': 'Raw_observations',
+                 'sat_freq_sequence': 'Satellite_frequency_sequence',
+                 'satellite_count': 'Satellite_count',
                  'derivatives': 'Derivatives',
                  'code_phase_diffs': 'Code_phase_diffs',
                  'code_phase_diff_raw': 'Code_phase_diffs_raw',
@@ -855,7 +988,29 @@ class VisualizationWindow:
              top.update_idletasks()
              
              try:
-                 # 特殊处理周跳探测
+                 if chart_type == 'sat_freq_sequence':
+                     self.plotter.plot_satellite_frequency_sequence(
+                         {'observations_meters': self.context.observations_meters},
+                         save=True,
+                         output_dir=target_dir,
+                        **_sequence_plot_filters(),
+                     )
+                     status_var.set(f'已保存卫星-频点序列图至 {target_dir}')
+                     messagebox.showinfo('完成', f'卫星-频点序列图已保存\n保存路径: {target_dir}')
+                     return
+
+                 if chart_type == 'satellite_count':
+                     self.plotter.plot_satellite_count(
+                         {'observations_meters': self.context.observations_meters},
+                         save=True,
+                         output_dir=target_dir,
+                         **_sequence_plot_filters()
+                     )
+                     status_var.set(f'已保存卫星数量图至 {target_dir}')
+                     messagebox.showinfo('完成', f'卫星数量图已保存\n保存路径: {target_dir}')
+                     return
+
+                    # 特殊处理周跳探测
                  if chart_type == 'cycle_slip_detection':
                      from src.processing.cycle_slip_detector import CycleSlipDetector
                      from src.reporting.cycle_slip_logger import CycleSlipLogger
@@ -903,11 +1058,9 @@ class VisualizationWindow:
                          freq_pair=freq_pair
                      )
                      
-                     # 保存日志
-                     if save_log_var.get():
-                         logger = CycleSlipLogger(output_dir=cycleslip_dir)
-                         log_path = logger.save_cycle_slip_log(detection_results)
-                         csv_path = logger.save_cycle_slip_csv(detection_results)
+                     logger = CycleSlipLogger(output_dir=cycleslip_dir)
+                     log_path = logger.save_cycle_slip_log(detection_results)
+                     csv_path = logger.save_cycle_slip_csv(detection_results)
                      
                      # 为每个卫星保存图表
                      count = 0
