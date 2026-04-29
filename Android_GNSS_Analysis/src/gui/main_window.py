@@ -178,7 +178,7 @@ def main():
     copyright_frame = ttk.Frame(main_frame)
     copyright_frame.pack(fill=tk.X, pady=(20, 10))
 
-    ttk.Label(copyright_frame, text="© 2025 CZ",
+    ttk.Label(copyright_frame, text="© 2026 CZ",
               font=("Microsoft YaHei", 9),
               foreground="gray").pack(anchor=tk.CENTER)
 

@@ -229,7 +229,7 @@ class GNSSPlotter:
         ax.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M'))
         fig.autofmt_xdate(rotation=0, ha='center')
 
-        legend = ax.legend(handles=legend_items, loc='center right', bbox_to_anchor=(1.0, 0.5), frameon=True, fontsize='small', borderpad=0.4, fancybox=True, framealpha=0.9)
+        legend = ax.legend(handles=legend_items, loc='center right', bbox_to_anchor=(1.0, 0.5), frameon=True, fontsize=plt.rcParams.get('legend.fontsize', 'small'), borderpad=0.4, fancybox=True, framealpha=0.9)
         legend.set_draggable(True)
         fig.subplots_adjust(left=0.08, right=0.88, top=0.96, bottom=0.08)
 
@@ -355,7 +355,7 @@ class GNSSPlotter:
             loc='upper left',
             bbox_to_anchor=(1.01, 1.0),
             frameon=True,
-            fontsize='small',
+            fontsize=plt.rcParams.get('legend.fontsize', 'small'),
         )
         legend.set_draggable(True)
 
@@ -528,7 +528,7 @@ class GNSSPlotter:
                             pass
 
         if plotted:
-            ax.legend(loc='upper right', fontsize='small')
+            ax.legend(loc='upper right', fontsize=plt.rcParams.get('legend.fontsize', 'small'))
         ax.set_xlabel('Epoch')
         ax.set_ylabel('Observation (m)')
         ax.set_title(f'{sat_id} Raw Observations')

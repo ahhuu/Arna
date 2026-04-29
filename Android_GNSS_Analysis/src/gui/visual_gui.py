@@ -103,6 +103,24 @@ class VisualizationWindow:
                 load_satellite_info()
         ttk.Button(file_frame, text='浏览', command=select_file).pack(side=tk.RIGHT)
 
+        # receiver file
+        rx_frame = ttk.LabelFrame(main_frame, text='选择接收机RINEX文件(用于CMC/ISB)', padding=10)
+        rx_frame.pack(fill=tk.X, pady=8)
+        rx_var = tk.StringVar()
+        rx_entry = ttk.Entry(rx_frame, textvariable=rx_var, width=50)
+        rx_entry.pack(side=tk.LEFT, padx=(0,10), fill=tk.X, expand=True)
+
+        def select_rx():
+            file_types = [
+                ("RINEX Files", "*.??O *.??o *.RNX *.rnx"),
+                ("All Files", "*.*")
+            ]
+            f = filedialog.askopenfilename(title='选择接收机RINEX文件', filetypes=file_types)
+            if f:
+                rx_var.set(f)
+                load_receiver_satellite_info()
+        ttk.Button(rx_frame, text='浏览', command=select_rx).pack(side=tk.RIGHT)
+
         # Chart types
         chart_frame = ttk.LabelFrame(main_frame, text='图表类型', padding=10)
         chart_frame.pack(fill=tk.X, pady=8)
@@ -196,6 +214,12 @@ class VisualizationWindow:
                     sequence_filter_frame.pack(fill=tk.X, pady=(8, 0))
             else:
                 sequence_filter_frame.pack_forget()
+
+            if current_type in ('receiver_cmc', 'isb_analysis'):
+                if not rx_frame.winfo_ismapped():
+                    rx_frame.pack(fill=tk.X, pady=8, before=chart_frame)
+            else:
+                rx_frame.pack_forget()
         chart_var.trace_add('write', _on_chart_type_changed)
         
         # 周跳探测阈值设置
@@ -220,24 +244,6 @@ class VisualizationWindow:
         gf_threshold_var = tk.DoubleVar(value=0.05)
         gf_threshold_entry = ttk.Entry(custom_threshold_frame, textvariable=gf_threshold_var, width=8)
         gf_threshold_entry.pack(side=tk.LEFT, padx=2)
-
-        # receiver file
-        rx_frame = ttk.LabelFrame(main_frame, text='选择接收机RINEX文件(用于CMC/ISB)', padding=10)
-        rx_frame.pack(fill=tk.X, pady=8)
-        rx_var = tk.StringVar()
-        rx_entry = ttk.Entry(rx_frame, textvariable=rx_var, width=50)
-        rx_entry.pack(side=tk.LEFT, padx=(0,10), fill=tk.X, expand=True)
-
-        def select_rx():
-            file_types = [
-                ("RINEX Files", "*.??O *.??o *.RNX *.rnx"),
-                ("All Files", "*.*")
-            ]
-            f = filedialog.askopenfilename(title='选择接收机RINEX文件', filetypes=file_types)
-            if f:
-                rx_var.set(f)
-                load_receiver_satellite_info()
-        ttk.Button(rx_frame, text='浏览', command=select_rx).pack(side=tk.RIGHT)
 
         # satellite selection
         sat_frame = ttk.LabelFrame(main_frame, text='卫星系统/PRN/频率选择', padding=10)
@@ -344,7 +350,44 @@ class VisualizationWindow:
             _populate_group('sats', sats)
             _populate_group('freqs', freqs)
 
+        title_font_var = tk.IntVar(value=16)
+        label_font_var = tk.IntVar(value=14)
+        tick_font_var = tk.IntVar(value=14)
+        legend_font_var = tk.IntVar(value=14)
+
+        def _apply_font_settings():
+            try:
+                plt.rcParams.update({
+                    'axes.titlesize': int(title_font_var.get()),
+                    'axes.labelsize': int(label_font_var.get()),
+                    'xtick.labelsize': int(tick_font_var.get()),
+                    'ytick.labelsize': int(tick_font_var.get()),
+                    'legend.fontsize': int(legend_font_var.get()),
+                    'figure.titlesize': int(title_font_var.get())
+                })
+            except Exception:
+                pass
+
         _on_chart_type_changed()
+
+        font_frame = ttk.LabelFrame(main_frame, text='字体设置', padding=10)
+        font_frame.pack(fill=tk.X, pady=8)
+        ttk.Label(font_frame, text='标题').grid(row=0, column=0, sticky='w', padx=4, pady=2)
+        ttk.Spinbox(font_frame, from_=8, to=24, textvariable=title_font_var, width=5).grid(row=0, column=1, sticky='w', padx=4, pady=2)
+        ttk.Label(font_frame, text='坐标轴').grid(row=0, column=2, sticky='w', padx=4, pady=2)
+        ttk.Spinbox(font_frame, from_=8, to=20, textvariable=label_font_var, width=5).grid(row=0, column=3, sticky='w', padx=4, pady=2)
+        ttk.Label(font_frame, text='刻度').grid(row=0, column=4, sticky='w', padx=4, pady=2)
+        ttk.Spinbox(font_frame, from_=8, to=18, textvariable=tick_font_var, width=5).grid(row=0, column=5, sticky='w', padx=4, pady=2)
+        ttk.Label(font_frame, text='图例').grid(row=0, column=6, sticky='w', padx=4, pady=2)
+        ttk.Spinbox(font_frame, from_=8, to=18, textvariable=legend_font_var, width=5).grid(row=0, column=7, sticky='w', padx=4, pady=2)
+        ttk.Button(font_frame, text='重置', command=lambda: _reset_font_settings()).grid(row=0, column=8, sticky='w', padx=10, pady=2)
+
+        def _reset_font_settings():
+            title_font_var.set(16)
+            label_font_var.set(14)
+            tick_font_var.set(14)
+            legend_font_var.set(14)
+            _apply_font_settings()
 
         # progress
         progress_frame = ttk.LabelFrame(main_frame, text='处理进度', padding=10)
@@ -612,6 +655,7 @@ class VisualizationWindow:
             }
 
         def gen_chart():
+            _apply_font_settings()
             chart_type = chart_var.get()
             sat = sat_prn_var.get()
             freqv = freq_var.get()
@@ -903,6 +947,7 @@ class VisualizationWindow:
              top.update_idletasks()
              
              try:
+                 _apply_font_settings()
                  pre_calculate_metrics()
                  sats = sorted(self.context.observations_meters.keys())
                  count = 0
@@ -988,6 +1033,7 @@ class VisualizationWindow:
              top.update_idletasks()
              
              try:
+                 _apply_font_settings()
                  if chart_type == 'sat_freq_sequence':
                      self.plotter.plot_satellite_frequency_sequence(
                          {'observations_meters': self.context.observations_meters},
