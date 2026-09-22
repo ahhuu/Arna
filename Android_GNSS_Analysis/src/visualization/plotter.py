@@ -2109,6 +2109,188 @@ class GNSSPlotter:
             return {'figure': None, 'path': path, 'log': log_path}
         return {'figure': fig, 'path': None}
 
+    def plot_doppler_quality(self, observations: Dict[str, Any], save: bool = True,
+                             output_dir: Optional[str] = None,
+                             system_filters=None, sat_filters=None,
+                             freq_filters=None) -> Dict[str, Any]:
+        """Plot Doppler completeness, phase consistency, outliers and smoothness."""
+        import numpy as np
+        from src.processing.calculator import MetricCalculator
+
+        obs = observations.get('observations_meters', observations) if isinstance(observations, dict) else observations
+        filtered = {}
+        for sat_id in sorted(obs, key=self._satellite_sort_key):
+            if not self._selection_allows(system_filters, sat_id[0]):
+                continue
+            if not self._selection_allows(sat_filters, sat_id):
+                continue
+            selected = {}
+            for freq, values in obs[sat_id].items():
+                if self._frequency_sequence_accepts(sat_id, freq, system_filters, sat_filters, freq_filters):
+                    selected[freq] = values
+            if selected:
+                filtered[sat_id] = selected
+        if not filtered:
+            raise ValueError('No observations after filtering for Doppler quality analysis')
+
+        quality = MetricCalculator().calculate_doppler_quality({'observations_meters': filtered})
+        rows = quality.get('summary', [])
+        if not rows:
+            raise ValueError('No Doppler quality data available')
+
+        selected_systems = sorted({sat_id[0] for sat_id in filtered})
+        all_satellites_selected = not sat_filters or set(sat_filters) >= set(obs.keys())
+        aggregate_mode = len(selected_systems) > 1 and all_satellites_selected
+
+        def percentile(values, percent):
+            values = sorted(values)
+            if not values:
+                return None
+            position = (len(values) - 1) * percent / 100.0
+            lower = int(math.floor(position))
+            upper = int(math.ceil(position))
+            if lower == upper:
+                return values[lower]
+            weight = position - lower
+            return values[lower] * (1.0 - weight) + values[upper] * weight
+
+        if aggregate_mode:
+            system_names = {'G': 'GPS', 'R': 'GLO', 'E': 'Galileo', 'C': 'BDS',
+                            'J': 'QZSS', 'I': 'IRNSS', 'S': 'SBAS'}
+            grouped = {}
+            for row in rows:
+                grouped.setdefault((row['system'], row['freq']), []).append(row)
+            plot_rows = []
+            for (system, freq), members in sorted(grouped.items()):
+                system_label = system_names.get(system, system)
+                residuals = [value for member in members
+                             for value in member.get('phase_consistency_residuals', [])]
+                accelerations = [value for member in members
+                                 for value in member.get('accelerations_mps2', [])]
+                total_epochs = sum(member.get('total_epochs', 0) for member in members)
+                valid_doppler = sum(member.get('valid_doppler_epochs', 0) for member in members)
+                valid_residuals = sum(member.get('valid_residual_count', 0) for member in members)
+                outliers = sum(member.get('outlier_count', 0) for member in members)
+                median_residual = statistics.median(residuals) if residuals else None
+                plot_rows.append({
+                    'sat_id': system_label,
+                    'system': system,
+                    'freq': freq,
+                    'group_label': f'{system_label}\n{freq}',
+                    'member_count': len(members),
+                    'total_epochs': total_epochs,
+                    'valid_doppler_epochs': valid_doppler,
+                    'completeness_percent': 100.0 * valid_doppler / total_epochs if total_epochs else 0.0,
+                    'residual_rms_m': (math.sqrt(sum(v * v for v in residuals) / len(residuals))
+                                       if residuals else None),
+                    'residual_mad_m': (statistics.median([abs(v - median_residual) for v in residuals])
+                                       if residuals else None),
+                    'residual_p95_m': percentile([abs(v) for v in residuals], 95),
+                    'outlier_count': outliers,
+                    'valid_residual_count': valid_residuals,
+                    'outlier_rate_percent': 100.0 * outliers / valid_residuals if valid_residuals else 0.0,
+                    'acceleration_p95_mps2': percentile([abs(v) for v in accelerations], 95),
+                })
+            grouping_label = 'System-Frequency Summary'
+        else:
+            plot_rows = rows
+            for row in plot_rows:
+                row['group_label'] = f"{row['sat_id']}\n{row['freq']}"
+                row['member_count'] = 1
+            grouping_label = 'Satellite-Frequency Detail'
+
+        labels = [row['group_label'] for row in plot_rows]
+        x = np.arange(len(plot_rows))
+        fig, axes = plt.subplots(2, 2, figsize=(20, 11))
+        # Showing every satellite/frequency label makes a full multi-GNSS data set
+        # unreadable. Keep every bar, but display an evenly sampled set of ticks.
+        max_visible_ticks = 22
+        tick_step = max(1, int(math.ceil(len(plot_rows) / max_visible_ticks)))
+        tick_positions = list(range(0, len(plot_rows), tick_step))
+        if plot_rows and tick_positions[-1] != len(plot_rows) - 1:
+            tick_positions.append(len(plot_rows) - 1)
+        plots = [
+            ('completeness_percent', 'Completeness (%)', 'Doppler Data Completeness', 'steelblue'),
+            ('residual_rms_m', 'RMS (m)', 'Doppler-Phase Consistency Residual', 'tomato'),
+            ('outlier_rate_percent', 'Outlier Rate (%)', 'Consistency Outlier Rate', 'darkorange'),
+            ('acceleration_p95_mps2', 'P95 (m/s^2)', 'Doppler Smoothness (Acceleration P95)', 'seagreen'),
+        ]
+        for ax, (key, ylabel, title, color) in zip(axes.flat, plots):
+            values = [row.get(key) if row.get(key) is not None else 0.0 for row in plot_rows]
+            bars = ax.bar(x, values, color=color, alpha=0.82)
+            ax.set_xticks(tick_positions)
+            ax.set_xticklabels([labels[index] for index in tick_positions],
+                               rotation=45, ha='right', fontsize=8,
+                               rotation_mode='anchor')
+            ax.set_xlim(-0.75, len(plot_rows) - 0.25)
+            ax.set_ylabel(ylabel)
+            ax.set_title(title)
+            ax.grid(True, axis='y', alpha=0.3)
+            for bar, row, value in zip(bars, plot_rows, values):
+                bar._doppler_quality_row = row
+                if len(plot_rows) <= 20:
+                    ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height(),
+                            f'{value:.2f}', ha='center', va='bottom', fontsize=7)
+
+        fig.suptitle(f'Doppler Quality Analysis - {grouping_label}', fontsize=15, fontweight='bold')
+        fig.tight_layout(rect=(0, 0.02, 1, 0.97), h_pad=2.2, w_pad=2.0)
+
+        if MPLCURSORS_AVAILABLE and not save:
+            cursor = mplcursors.cursor([patch for ax in axes.flat for patch in ax.patches], hover=False)
+            def _on_add(selection):
+                row = getattr(selection.artist, '_doppler_quality_row', {})
+                selection.annotation.set_text(
+                    f"{row.get('sat_id')} {row.get('freq')} ({row.get('member_count', 1)} satellites)\n"
+                    f"Completeness: {row.get('completeness_percent', 0):.2f}%\n"
+                    f"Residual RMS: {row.get('residual_rms_m') if row.get('residual_rms_m') is not None else 'NA'}\n"
+                    f"Residual P95: {row.get('residual_p95_m') if row.get('residual_p95_m') is not None else 'NA'}\n"
+                    f"Outliers: {row.get('outlier_count', 0)}/{row.get('valid_residual_count', 0)}"
+                )
+            cursor.connect('add', _on_add)
+
+        if save:
+            path = self._save_fig(fig, 'doppler_quality', output_dir)
+            out_dir = self._ensure_output_dir(output_dir)
+            log_path = os.path.join(out_dir, 'doppler_quality_log.txt')
+            with open(log_path, 'w', encoding='utf-8') as fh:
+                fh.write('Doppler Quality Analysis Report\n')
+                fh.write(f'Generated: {datetime.datetime.utcnow().isoformat()}Z\n\n')
+                fh.write(f'Plot grouping: {grouping_label}\n')
+                fh.write('Multi-system overview uses system-frequency aggregation; a single system or explicit satellite selection uses satellite-frequency detail.\n\n')
+                fh.write('Doppler-phase residual = phase range change - integrated Doppler range-rate\n')
+                fh.write('Outlier threshold = max(0.5 m, 4 * 1.4826 * MAD)\n\n')
+                fh.write('Plotted Groups:\n')
+                fh.write(f'{"Group":<18}{"Members":>8}{"Complete%":>11}{"RMS(m)":>11}{"MAD(m)":>11}'
+                         f'{"P95(m)":>11}{"Outlier%":>11}{"AccP95":>11}{"N":>8}\n')
+                for row in plot_rows:
+                    def number(name, width=11, precision=4):
+                        value = row.get(name)
+                        return f'{value:>{width}.{precision}f}' if value is not None else f'{"NA":>{width}}'
+                    name = f"{row['sat_id']} {row['freq']}"
+                    fh.write(f'{name:<18}{row.get("member_count", 1):>8}{row["completeness_percent"]:>11.2f}'
+                             f'{number("residual_rms_m")}{number("residual_mad_m")}'
+                             f'{number("residual_p95_m")}{row["outlier_rate_percent"]:>11.2f}'
+                             f'{number("acceleration_p95_mps2")}{row["valid_residual_count"]:>8}\n')
+                fh.write('\nSatellite-Frequency Detail:\n')
+                fh.write(f'{"Satellite/Freq":<18}{"Complete%":>11}{"RMS(m)":>11}{"P95(m)":>11}{"Outlier%":>11}{"AccP95":>11}{"N":>8}\n')
+                for row in rows:
+                    name = f"{row['sat_id']} {row['freq']}"
+                    def detail_number(key):
+                        value = row.get(key)
+                        return f'{value:>11.4f}' if value is not None else f'{"NA":>11}'
+                    fh.write(f'{name:<18}{row["completeness_percent"]:>11.2f}'
+                             f'{detail_number("residual_rms_m")}{detail_number("residual_p95_m")}'
+                             f'{row["outlier_rate_percent"]:>11.2f}{detail_number("acceleration_p95_mps2")}'
+                             f'{row["valid_residual_count"]:>8}\n')
+                fh.write('\nCross-frequency Doppler consistency (m/s):\n')
+                fh.write(f'{"Satellite/Pair":<24}{"N":>8}{"Bias":>12}{"RMS":>12}{"P95":>12}\n')
+                for item in quality.get('cross_frequency', []):
+                    name = f"{item['sat_id']} {item['freq1']}-{item['freq2']}"
+                    fh.write(f'{name:<24}{item["count"]:>8}{item["bias_mps"]:>12.4f}'
+                             f'{item["rms_mps"]:>12.4f}{item["p95_mps"]:>12.4f}\n')
+            return {'figure': None, 'path': path, 'log': log_path, 'quality': quality}
+        return {'figure': fig, 'path': None, 'log': None, 'quality': quality}
+
     def plot_observation_noise(self, observations: Dict[str, Any], save: bool = True,
                                 output_dir: Optional[str] = None,
                                 system_filters=None,

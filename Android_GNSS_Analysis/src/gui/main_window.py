@@ -116,7 +116,7 @@ def main():
     desc_frame = ttk.LabelFrame(main_frame, text="功能说明", padding="20")
     desc_frame.pack(fill=tk.X, pady=20)
 
-    ttk.Label(desc_frame, text="• 预处理：多普勒预测相位→多普勒平滑伪距→码相不一致性建模校正→CMC变化阈值剔除→历元间双差剔除→BDS2/3 ISB分析校正",
+    ttk.Label(desc_frame, text="• 预处理：多普勒预测相位→伪距多路径改正→多普勒平滑伪距→码相不一致性建模校正→CMC变化阈值剔除→历元间双差剔除→BDS2/3 ISB分析校正",
               font=("Microsoft YaHei", 10), wraplength=900).pack(anchor=tk.W, pady=2)
     ttk.Label(desc_frame, text="• 可视化：生成各类分析图表，支持单独保存和批量保存",
               font=("Microsoft YaHei", 10)).pack(anchor=tk.W, pady=2)

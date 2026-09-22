@@ -9,94 +9,165 @@ class ReportWindow:
     def __init__(self, context: Optional[AnalysisContext] = None):
         self.context = context or AnalysisContext()
         self.reporter = ReportGenerator()
+        self.selected_source = None
+
+    def _source(self):
+        return (self.selected_source or
+                self.context.results.get('processing_manifest_path') or
+                self.context.output_dir or self.context.input_path)
 
     def generate_report(self) -> str:
-        report = self.reporter.generate_text_report({'results': self.context.results, 'input_path': self.context.input_path, 'output_dir': self.context.output_dir})
-        self.context.results['last_report'] = report
-        return report
+        source = self._source()
+        manifest_path = self.reporter.find_manifest(source)
+        if manifest_path:
+            return self.reporter.generate_text_report(self.reporter.load_manifest(manifest_path))
+        return self.reporter.generate_text_report({
+            'results': self.context.results,
+            'input_path': self.context.input_path,
+        })
 
-    def save_report(self, output_dir: str, filename: Optional[str] = None) -> str:
-        report = self.context.results.get('last_report') or self.generate_report()
-        os.makedirs(output_dir, exist_ok=True)
-        if not filename:
-            obs_name = os.path.splitext(os.path.basename(self.context.input_path or 'report'))[0]
-            filename = f"{obs_name}-report-{datetime.datetime.utcnow().strftime('%Y%m%dT%H%M%SZ')}.txt"
-        if not filename.lower().endswith('.txt'):
-            filename += '.txt'
-        path = os.path.join(output_dir, filename)
-        with open(path, 'w', encoding='utf-8') as f:
-            f.write(report)
-        return path
+    def save_report(self, output_dir: str, filename: Optional[str] = None):
+        source = self._source()
+        manifest_path = self.reporter.find_manifest(source)
+        generated = {}
+        task_root = None
+        if manifest_path:
+            task_root = os.path.dirname(os.path.dirname(manifest_path))
+            preprocessing_dir = os.path.join(output_dir, 'preprocessing')
+            generated['preprocessing'] = self.reporter.save_report_bundle(
+                manifest_path, preprocessing_dir, 'gnss-preprocessing-report')
+        source_path = os.path.abspath(source) if source else ''
+        if task_root is None and source_path:
+            if os.path.basename(source_path).lower() in ('preprocessing', 'visualization', 'report'):
+                task_root = os.path.dirname(source_path)
+            elif os.path.isdir(source_path):
+                task_root = source_path
+        visualization_dir = os.path.join(task_root, 'visualization') if task_root else None
+        visualization_manifest = (os.path.join(visualization_dir, self.reporter.VISUALIZATION_MANIFEST_NAME)
+                                  if visualization_dir else None)
+        if visualization_manifest and os.path.isfile(visualization_manifest):
+            with open(visualization_manifest, encoding='utf-8') as fh:
+                import json
+                visual_info = json.load(fh)
+            generated['visualization'] = self.reporter.write_visualization_report(
+                visualization_dir,
+                visual_info.get('input_path', self.context.input_path or ''),
+                selection=visual_info.get('selection', 'all'),
+                metadata=visual_info.get('metadata', {}),
+                generate_reports=True,
+                report_output_dir=os.path.join(output_dir, 'visualization'),
+            )
+        if not generated:
+            raise FileNotFoundError('没有找到预处理或可视化任务清单，请先执行相应处理。')
+        return generated
 
     def show(self, parent):
         try:
             import tkinter as tk
-            from tkinter import ttk, filedialog
+            from tkinter import ttk, filedialog, messagebox
         except Exception:
             return
 
         top = tk.Toplevel(parent)
-        top.title('报告')
-        top.geometry('800x650')
+        top.title('生成综合分析报告')
+        top.geometry('900x700')
         top.transient(parent)
         top.grab_set()
 
-        file_frame = ttk.LabelFrame(top, text='选择手机RINEX文件', padding=10)
-        file_frame.pack(fill='x', padx=6, pady=(6, 0))
-        file_var = tk.StringVar(value=self.context.input_path or '')
-        file_entry = ttk.Entry(file_frame, textvariable=file_var, width=60)
-        file_entry.pack(side='left', padx=(0,10), fill='x', expand=True)
+        source_frame = ttk.LabelFrame(top, text='报告数据源', padding=10)
+        source_frame.pack(fill='x', padx=8, pady=(8, 0))
+        source_var = tk.StringVar(value=self._source() or '')
+        ttk.Entry(source_frame, textvariable=source_var).pack(side='left', padx=(0, 8), fill='x', expand=True)
 
-        def select_file():
-            file_types = [
-                ("RINEX Files", "*.??O *.??o *.RNX *.rnx"),
-                ("All Files", "*.*")
-            ]
-            f = filedialog.askopenfilename(title='选择RINEX观测文件', filetypes=file_types)
-            if f:
-                file_var.set(f)
-                self.context.set_input_path(f)
-                base_dir = os.path.dirname(f)
-                obs_name = os.path.splitext(os.path.basename(f))[0]
-                self.context.set_output_dir(os.path.join(base_dir, 'Arna_results', obs_name, 'report'))
-                status_var.set(f'已选择文件: {os.path.basename(f)}')
+        status_var = tk.StringVar(value='可使用当前预处理会话，也可选择历史 preprocessing 目录或任务清单。')
 
-        ttk.Button(file_frame, text='浏览', command=select_file).pack(side='right')
+        def choose_manifest():
+            path = filedialog.askopenfilename(
+                title='选择预处理任务清单',
+                filetypes=[('Processing manifest', 'processing_manifest.json'), ('JSON', '*.json')])
+            if path:
+                self.selected_source = path
+                source_var.set(path)
+                refresh()
 
-        progress_frame = ttk.LabelFrame(top, text='状态', padding=10)
-        progress_frame.pack(fill='x', padx=6, pady=(4, 0))
-        status_var = tk.StringVar(value='请选择 RINEX 文件或使用当前已加载文件')
-        ttk.Label(progress_frame, textvariable=status_var).pack(anchor='w')
+        def choose_directory():
+            path = filedialog.askdirectory(title='选择 preprocessing 结果目录')
+            if path:
+                self.selected_source = path
+                source_var.set(path)
+                refresh()
 
-        txt = tk.Text(top, wrap='word')
-        txt.pack(fill='both', expand=True, padx=6, pady=6)
+        ttk.Button(source_frame, text='选择任务清单', command=choose_manifest).pack(side='left', padx=3)
+        ttk.Button(source_frame, text='选择结果目录', command=choose_directory).pack(side='left', padx=3)
+
+        ttk.Label(top, textvariable=status_var).pack(fill='x', padx=10, pady=6)
+        text = tk.Text(top, wrap='word')
+        text.pack(fill='both', expand=True, padx=8, pady=4)
 
         def refresh():
-            report = self.generate_report()
-            txt.delete('1.0', tk.END)
-            txt.insert('1.0', report)
+            typed = source_var.get().strip()
+            if typed:
+                self.selected_source = typed
+            try:
+                report = self.generate_report()
+                text.delete('1.0', tk.END)
+                text.insert('1.0', report)
+                manifest = self.reporter.find_manifest(self._source())
+                if manifest:
+                    task_root = os.path.dirname(os.path.dirname(manifest))
+                    visual_manifest = os.path.join(task_root, 'visualization', self.reporter.VISUALIZATION_MANIFEST_NAME)
+                    visual_status = '；检测到可视化清单' if os.path.isfile(visual_manifest) else '；未检测到可视化清单'
+                    status_var.set(f'已加载预处理清单: {manifest}{visual_status}')
+                else:
+                    status_var.set('尚无任务清单；当前仅显示会话提示。')
+            except Exception as exc:
+                status_var.set(f'读取失败: {exc}')
+                messagebox.showerror('报告读取失败', str(exc))
 
-        refresh()
-
-        btn_frame = ttk.Frame(top)
-        btn_frame.pack(fill=tk.X, padx=6, pady=6)
-
-        def get_report_dir():
-            if self.context.output_dir:
-                return self.context.output_dir
-            current_file = file_var.get().strip() or self.context.input_path or ''
-            if current_file:
-                base_dir = os.path.dirname(current_file)
-                obs_name = os.path.splitext(os.path.basename(current_file))[0]
-                return os.path.join(base_dir, 'Arna_results', obs_name, 'report')
+        def default_report_dir():
+            manifest_path = self.reporter.find_manifest(self._source())
+            if manifest_path:
+                preprocessing_dir = os.path.dirname(manifest_path)
+                return os.path.join(os.path.dirname(preprocessing_dir), 'report')
             return os.path.join(os.getcwd(), 'report')
 
-        def on_save():
-            out_dir = get_report_dir()
-            filename = f"{os.path.splitext(os.path.basename(file_var.get() or self.context.input_path or 'report'))[0]}-report-{datetime.datetime.utcnow().strftime('%Y%m%dT%H%M%SZ')}.txt"
-            path = self.save_report(out_dir, filename=filename)
-            status_var.set(f'报告已保存: {path}')
-            tk.messagebox.showinfo('完成', f'报告已保存: {path}')
+        def generated_message(paths):
+            lines = []
+            for report_type, report_paths in paths.items():
+                if report_type == 'preprocessing':
+                    lines.append(f"预处理HTML: {report_paths['html']}")
+                    lines.append(f"预处理TXT: {report_paths['text']}")
+                else:
+                    lines.append(f"可视化HTML: {report_paths['html']}")
+                    lines.append(f"可视化TXT: {report_paths['text']}")
+            return '\n'.join(lines)
 
-        ttk.Button(btn_frame, text='刷新', command=refresh).pack(side='left', padx=4)
-        ttk.Button(btn_frame, text='保存', command=on_save).pack(side='left', padx=4)
+        def save_bundle():
+            try:
+                output_dir = default_report_dir()
+                stamp = datetime.datetime.now().strftime('%Y%m%d-%H%M%S')
+                paths = self.save_report(output_dir, f'gnss-preprocessing-report-{stamp}')
+                status_var.set('报告生成完成')
+                messagebox.showinfo('完成', '已生成报告：\n' + generated_message(paths))
+            except Exception as exc:
+                messagebox.showerror('报告生成失败', str(exc))
+
+        def save_as():
+            output_dir = filedialog.askdirectory(title='选择报告输出目录')
+            if not output_dir:
+                return
+            try:
+                stamp = datetime.datetime.now().strftime('%Y%m%d-%H%M%S')
+                paths = self.save_report(output_dir, f'gnss-preprocessing-report-{stamp}')
+                status_var.set('报告生成完成')
+                messagebox.showinfo('完成', '已生成报告：\n' + generated_message(paths))
+            except Exception as exc:
+                messagebox.showerror('报告生成失败', str(exc))
+
+        buttons = ttk.Frame(top)
+        buttons.pack(fill='x', padx=8, pady=8)
+        ttk.Button(buttons, text='刷新预览', command=refresh).pack(side='left', padx=4)
+        ttk.Button(buttons, text='生成全部HTML+TXT', command=save_bundle).pack(side='left', padx=4)
+        ttk.Button(buttons, text='另存为...', command=save_as).pack(side='left', padx=4)
+        ttk.Button(buttons, text='关闭', command=top.destroy).pack(side='right', padx=4)
+        refresh()

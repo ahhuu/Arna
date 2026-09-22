@@ -269,13 +269,15 @@ class MetricCalculator:
 
                 for i in range(1, len(times)):
                     if (phase_cycles[i - 1] is not None and doppler_mps[i - 1] is not None and i < len(doppler_mps)
-                            and doppler_mps[i] is not None and phase_cycles[i] is not None and frequency is not None
+                            and doppler_mps[i] is not None and phase_cycles[i] is not None
                             and wavelength is not None):
                         dt = (times[i] - times[i - 1]).total_seconds()
                         doppler_now_hz = doppler_mps[i] / wavelength
                         doppler_old_hz = doppler_mps[i - 1] / wavelength
                         doppler_arith = (doppler_now_hz + doppler_old_hz) / 2
-                        phase_change = -dt * doppler_arith / frequency
+                        # RINEX D is converted by the reader to phase range-rate
+                        # (-D * wavelength, m/s).  Integrating it gives phase change.
+                        phase_change = dt * doppler_arith
                         predicted_phase = phase_cycles[i - 1] + phase_change
                         error = (phase_cycles[i] - predicted_phase) * wavelength
                         freq_errors[freq]['times'].append(times[i])
@@ -846,6 +848,120 @@ class MetricCalculator:
         Forwards to calculate_epoch_double_diffs (canonical implementation).
         """
         return self.calculate_epoch_double_diffs(data)
+
+    def calculate_doppler_quality(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        """Evaluate Doppler completeness, phase consistency, smoothness and frequency consistency."""
+        observations = data.get('observations_meters', data) if isinstance(data, dict) else data
+        if not observations:
+            return {}
+
+        def percentile(values, percent):
+            ordered = sorted(values)
+            if not ordered:
+                return None
+            position = (len(ordered) - 1) * percent / 100.0
+            lower = int(math.floor(position))
+            upper = int(math.ceil(position))
+            if lower == upper:
+                return ordered[lower]
+            weight = position - lower
+            return ordered[lower] * (1.0 - weight) + ordered[upper] * weight
+
+        results = {}
+        summary_rows = []
+        cross_frequency = []
+        for sat_id, frequency_data in observations.items():
+            sat_result = {}
+            doppler_by_frequency = {}
+            for freq, obs in frequency_data.items():
+                times = obs.get('times', []) or []
+                phases = obs.get('phase', []) or []
+                dopplers = obs.get('doppler', []) or []
+                count = len(times)
+                valid_doppler = sum(1 for i in range(count)
+                                    if i < len(dopplers) and dopplers[i] is not None)
+                residuals = []
+                accelerations = []
+                residual_times = []
+                doppler_by_frequency[freq] = {
+                    times[i]: dopplers[i] for i in range(min(count, len(dopplers)))
+                    if dopplers[i] is not None
+                }
+                positive_steps = []
+                for i in range(1, count):
+                    try:
+                        dt = (times[i] - times[i - 1]).total_seconds()
+                    except AttributeError:
+                        dt = float(times[i] - times[i - 1])
+                    if dt > 0:
+                        positive_steps.append(dt)
+                nominal_dt = statistics.median(positive_steps) if positive_steps else None
+
+                for i in range(1, count):
+                    try:
+                        dt = (times[i] - times[i - 1]).total_seconds()
+                    except AttributeError:
+                        dt = float(times[i] - times[i - 1])
+                    continuous = dt > 0 and (nominal_dt is None or dt <= 1.5 * nominal_dt)
+                    if not continuous or i >= len(dopplers):
+                        continue
+                    d0, d1 = dopplers[i - 1], dopplers[i]
+                    if d0 is not None and d1 is not None:
+                        accelerations.append((d1 - d0) / dt)
+                        if i < len(phases) and phases[i - 1] is not None and phases[i] is not None:
+                            residuals.append((phases[i] - phases[i - 1]) - 0.5 * (d0 + d1) * dt)
+                            residual_times.append(times[i])
+
+                abs_residuals = [abs(value) for value in residuals]
+                median_residual = statistics.median(residuals) if residuals else None
+                mad = (statistics.median([abs(value - median_residual) for value in residuals])
+                       if residuals else None)
+                robust_sigma = 1.4826 * mad if mad is not None else None
+                threshold = max(0.5, 4.0 * robust_sigma) if robust_sigma is not None else 0.5
+                outlier_count = sum(1 for value in abs_residuals if value > threshold)
+                stats = {
+                    'total_epochs': count,
+                    'valid_doppler_epochs': valid_doppler,
+                    'completeness_percent': 100.0 * valid_doppler / count if count else 0.0,
+                    'residual_times': residual_times,
+                    'phase_consistency_residuals': residuals,
+                    'residual_bias_m': statistics.mean(residuals) if residuals else None,
+                    'residual_rms_m': math.sqrt(sum(v * v for v in residuals) / len(residuals)) if residuals else None,
+                    'residual_mad_m': mad,
+                    'residual_p95_m': percentile(abs_residuals, 95),
+                    'outlier_threshold_m': threshold,
+                    'outlier_count': outlier_count,
+                    'outlier_rate_percent': 100.0 * outlier_count / len(residuals) if residuals else 0.0,
+                    'acceleration_rms_mps2': (math.sqrt(sum(v * v for v in accelerations) / len(accelerations))
+                                              if accelerations else None),
+                    'acceleration_p95_mps2': percentile([abs(v) for v in accelerations], 95),
+                    'accelerations_mps2': accelerations,
+                    'valid_residual_count': len(residuals),
+                    'nominal_interval_seconds': nominal_dt,
+                }
+                sat_result[freq] = stats
+                summary_rows.append({'sat_id': sat_id, 'system': sat_id[:1], 'freq': freq, **stats})
+
+            frequencies = sorted(doppler_by_frequency)
+            for first_index, freq1 in enumerate(frequencies):
+                for freq2 in frequencies[first_index + 1:]:
+                    common_times = sorted(set(doppler_by_frequency[freq1]) & set(doppler_by_frequency[freq2]))
+                    differences = [doppler_by_frequency[freq1][t] - doppler_by_frequency[freq2][t]
+                                   for t in common_times]
+                    if differences:
+                        cross_frequency.append({
+                            'sat_id': sat_id, 'freq1': freq1, 'freq2': freq2,
+                            'count': len(differences),
+                            'bias_mps': statistics.mean(differences),
+                            'rms_mps': math.sqrt(sum(v * v for v in differences) / len(differences)),
+                            'p95_mps': percentile([abs(v) for v in differences], 95),
+                        })
+            if sat_result:
+                results[sat_id] = sat_result
+
+        results['summary'] = summary_rows
+        results['cross_frequency'] = cross_frequency
+        return results
 
     def calculate_observation_noise(self, data: Dict[str, Any]) -> Dict[str, Any]:
         """Compute pseudorange and carrier phase observation noise using third-order difference.

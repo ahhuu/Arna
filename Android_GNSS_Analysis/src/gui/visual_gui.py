@@ -5,6 +5,7 @@ from src.core.context import AnalysisContext
 from src.visualization.plotter import GNSSPlotter
 from src.data.reader import RinexReader
 from src.processing.calculator import MetricCalculator
+from src.reporting.reporter import ReportGenerator
 
 
 class VisualizationWindow:
@@ -167,6 +168,7 @@ class VisualizationWindow:
             ('数据完整率', 'data_integrity'),
             # 观测数据质量
             ('观测噪声分析', 'observation_noise'),
+            ('多普勒质量分析', 'doppler_quality'),
             ('伪距多路径-星座', 'pseudorange_multipath_overview'),
             ('伪距多路径-卫星', 'pseudorange_multipath'),
             # 码-相位一致性
@@ -302,7 +304,7 @@ class VisualizationWindow:
             else:
                 threshold_frame.pack_forget()
 
-            if current_type in ('sat_freq_sequence', 'satellite_count', 'pseudorange_multipath_overview', 'cnr_analysis', 'data_integrity', 'observation_noise'):
+            if current_type in ('sat_freq_sequence', 'satellite_count', 'pseudorange_multipath_overview', 'cnr_analysis', 'data_integrity', 'observation_noise', 'doppler_quality'):
                 if not sequence_filter_frame.winfo_ismapped():
                     sequence_filter_frame.pack(fill=tk.X, pady=(8, 0))
             else:
@@ -1061,6 +1063,8 @@ class VisualizationWindow:
                         out = self.plotter.plot_data_integrity({'observations_meters': self.context.observations_meters}, save=False, **_sequence_plot_filters())
                     elif chart_type == 'observation_noise':
                         out = self.plotter.plot_observation_noise({'observations_meters': self.context.observations_meters}, save=False, **_sequence_plot_filters())
+                    elif chart_type == 'doppler_quality':
+                        out = self.plotter.plot_doppler_quality({'observations_meters': self.context.observations_meters}, save=False, **_sequence_plot_filters())
                     else:
                         pre_calculate_metrics()
                         if chart_type == 'derivatives':
@@ -1088,6 +1092,16 @@ class VisualizationWindow:
                 status_var.set('失败')
 
         
+        def save_visualization_manifest(project_dir, selection, chart_count=None):
+            """Refresh the restart-safe inventory; reports are made on demand."""
+            return ReportGenerator().write_visualization_report(
+                project_dir,
+                file_var.get() or self.context.input_path or '',
+                selection=selection,
+                metadata={'chart_count_this_run': chart_count},
+                generate_reports=False,
+            )
+
         # Batch Save buttons
         def batch_save_all():
              if not self.context.observations_meters:
@@ -1198,7 +1212,17 @@ class VisualizationWindow:
                      count += 1
                  except Exception:
                      pass
+
+                 # Doppler Quality Analysis
+                 doppler_dir = os.path.join(project_dir, 'Doppler_Quality')
+                 if not os.path.exists(doppler_dir): os.makedirs(doppler_dir)
+                 try:
+                     self.plotter.plot_doppler_quality({'observations_meters': self.context.observations_meters}, save=True, output_dir=doppler_dir)
+                     count += 1
+                 except Exception:
+                     pass
                  
+                 save_visualization_manifest(project_dir, 'all', count)
                  status_var.set(f'批量保存完成: {count} 张')
                  messagebox.showinfo('完成', f'批量保存完成\n保存路径: {project_dir}')
              except Exception as e:
@@ -1244,6 +1268,7 @@ class VisualizationWindow:
                 'cnr_analysis': 'CNR_Analysis'
                 ,'data_integrity': 'Data_Integrity'
                 ,'observation_noise': 'Observation_Noise'
+                ,'doppler_quality': 'Doppler_Quality'
             }
             folder_name = folder_map.get(chart_type, chart_type)
             target_dir = os.path.join(project_dir, folder_name)
@@ -1264,6 +1289,7 @@ class VisualizationWindow:
                         output_dir=target_dir,
                         **_sequence_plot_filters(),
                     )
+                    save_visualization_manifest(project_dir, chart_type, 1)
                     status_var.set(f'已保存卫星-频点序列图至 {target_dir}')
                     messagebox.showinfo('完成', f'卫星-频点序列图已保存\n保存路径: {target_dir}')
                     return
@@ -1275,6 +1301,7 @@ class VisualizationWindow:
                         output_dir=target_dir,
                         **_sequence_plot_filters()
                     )
+                    save_visualization_manifest(project_dir, chart_type, 1)
                     status_var.set(f'已保存卫星数量图至 {target_dir}')
                     messagebox.showinfo('完成', f'卫星数量图已保存\n保存路径: {target_dir}')
                     return
@@ -1286,6 +1313,7 @@ class VisualizationWindow:
                         output_dir=target_dir,
                         **_sequence_plot_filters()
                     )
+                    save_visualization_manifest(project_dir, chart_type, 1)
                     status_var.set(f'已保存数据完整率至 {target_dir}')
                     messagebox.showinfo('完成', f'数据完整率图已保存\n保存路径: {target_dir}')
                     return
@@ -1297,6 +1325,7 @@ class VisualizationWindow:
                         output_dir=target_dir,
                         **_sequence_plot_filters()
                     )
+                    save_visualization_manifest(project_dir, chart_type, 1)
                     status_var.set(f'已保存载噪比分析图至 {target_dir}')
                     messagebox.showinfo('完成', f'载噪比分析图已保存\n保存路径: {target_dir}')
                     return
@@ -1308,12 +1337,26 @@ class VisualizationWindow:
                         output_dir=target_dir,
                         **_sequence_plot_filters()
                     )
+                    save_visualization_manifest(project_dir, chart_type, 1)
                     status_var.set(f'已保存观测噪声分析图至 {target_dir}')
                     messagebox.showinfo('完成', f'观测噪声分析图已保存\n保存路径: {target_dir}')
                     return
 
+                if chart_type == 'doppler_quality':
+                    result = self.plotter.plot_doppler_quality(
+                        {'observations_meters': self.context.observations_meters},
+                        save=True,
+                        output_dir=target_dir,
+                        **_sequence_plot_filters()
+                    )
+                    save_visualization_manifest(project_dir, chart_type, 1)
+                    status_var.set(f'已保存多普勒质量分析图至 {target_dir}')
+                    messagebox.showinfo('完成', f'多普勒质量分析图和日志已保存\n保存路径: {target_dir}\n日志: {result.get("log")}')
+                    return
+
                 if chart_type == 'pseudorange_multipath_overview':
                     out = _save_pseudorange_multipath_overview(output_dir=target_dir, save=True)
+                    save_visualization_manifest(project_dir, chart_type, 1)
                     status_var.set(f'已保存伪距多路径-星座图至 {target_dir}')
                     if out and out.get('log_path'):
                         messagebox.showinfo('完成', f'伪距多路径-星座图已保存\n保存路径: {target_dir}\n日志: {out["log_path"]}')
@@ -1353,6 +1396,7 @@ class VisualizationWindow:
                                 except Exception:
                                     continue
 
+                    save_visualization_manifest(project_dir, chart_type, count)
                     status_var.set(f'已保存伪距多路径-卫星图至 {target_dir}')
                     messagebox.showinfo('完成', f'伪距多路径-卫星图已保存\n保存路径: {target_dir}')
                     return
@@ -1409,6 +1453,7 @@ class VisualizationWindow:
                         except Exception:
                             continue
 
+                    save_visualization_manifest(project_dir, chart_type, count)
                     status_var.set(f'批量保存完成: {count} 张周跳探测图')
                     messagebox.showinfo('完成', f'已保存 {count} 张周跳探测图表\n目录: {cycleslip_dir}')
                     return
@@ -1544,6 +1589,7 @@ class VisualizationWindow:
                                 except Exception:
                                     continue
 
+                save_visualization_manifest(project_dir, chart_type, count)
                 status_var.set(f'批量保存完成: {count} 张')
                 messagebox.showinfo('完成', f'已保存 {count} 张图表\n目录: {target_dir}')
             except Exception as e:

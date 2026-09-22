@@ -1,8 +1,10 @@
 from typing import Dict, Any, List, Optional, Tuple
 import os
 import datetime
+import copy
 import pandas as pd
 import numpy as np
+from ..core.config import GNSS_FREQUENCIES, SPEED_OF_LIGHT
 from ..data.writer import RinexWriter
 from .cycle_slip_detector import CycleSlipDetector
 from .inter_freq_bias import InterFrequencyBiasAnalyzer
@@ -894,6 +896,508 @@ class CoreAlgorithmProcessor:
 
         return {'corrected_rinex_path': output_path, 'modified': 0, 'modified_satellites': []}
 
+    def apply_pseudorange_multipath_correction(
+            self,
+            observations_meters: Dict[str, Any],
+            freq_pair: Optional[Tuple[str, str]] = None,
+            gain: float = 0.5,
+            min_arc_epochs: int = 30,
+            arc_gap_seconds: float = 3.0,
+            mad_scale: float = 6.0,
+            mad_floor_m: float = 0.5,
+            max_correction_m: float = 10.0,
+            reject_half_cycle: bool = True,
+            process_additional_pairs: bool = True) -> Dict[str, Any]:
+        """Estimate and apply dual-frequency pseudorange multipath corrections.
+
+        The correction is deliberately arc-relative: the robust median of each
+        continuous MP arc removes carrier ambiguities and code/phase hardware
+        offsets.  The resulting correction is a code-multipath proxy, not a
+        physically separable multipath measurement.  The input is not mutated.
+
+        Returns ``corrected_observations``, per-satellite/frequency correction
+        records, summary statistics, and a human-readable log.
+        """
+        gain = float(gain)
+        min_arc_epochs = max(2, int(min_arc_epochs))
+        arc_gap_seconds = max(0.1, float(arc_gap_seconds))
+        mad_scale = max(0.0, float(mad_scale))
+        mad_floor_m = max(0.0, float(mad_floor_m))
+        max_correction_m = max(0.0, float(max_correction_m))
+
+        source_observations = copy.deepcopy(observations_meters or {})
+        corrected = copy.deepcopy(source_observations)
+        corrections: Dict[str, Dict[str, Any]] = {}
+        detail_records: List[Dict[str, Any]] = []
+        stats = {
+            'satellites_seen': len(corrected),
+            'satellites_corrected': 0,
+            'arcs_seen': 0,
+            'arcs_corrected': 0,
+            'samples_considered': 0,
+            'samples_corrected': 0,
+            'samples_skipped': 0,
+        }
+        log_lines = [
+            '伪距多路径改正（双频MP组合）',
+            f'改正增益: {gain:.3f}',
+            f'最小连续弧段: {min_arc_epochs} 历元',
+            f'最大弧段间隔: {arc_gap_seconds:.3f} s',
+            f'MAD异常倍数: {mad_scale:.3f}',
+            f'MAD最小尺度: {mad_floor_m:.3f} m',
+            f'最大改正量: {max_correction_m:.3f} m',
+            f'拒绝未解决半周: {bool(reject_half_cycle)}',
+            '',
+        ]
+
+        preferred_pairs = {
+            'G': [('L1C', 'L5Q')],
+            'C': [('L1P', 'L5P'), ('L2I', 'L5P'), ('L2I', 'L1P')],
+            'E': [('L1C', 'L5Q'), ('L1C', 'L7Q'), ('L5Q', 'L7Q')],
+            'J': [('L1C', 'L5Q')],
+            'R': [('L1C', 'L2C')],
+        }
+
+        def _time_delta_seconds(a, b):
+            try:
+                return (a - b).total_seconds()
+            except Exception:
+                try:
+                    return float(a) - float(b)
+                except Exception:
+                    return None
+
+        def _frequency(freq_name, freq_data):
+            wavelengths = freq_data.get('wavelength', []) or []
+            for wavelength in wavelengths:
+                if wavelength is not None and float(wavelength) > 0:
+                    return SPEED_OF_LIGHT / float(wavelength)
+            return GNSS_FREQUENCIES.get(system, {}).get(freq_name)
+
+        def _has_valid_series(sat_data, freq_name):
+            item = sat_data.get(freq_name, {}) or {}
+            return any(v is not None for v in item.get('code', []) or []) and any(
+                v is not None for v in item.get('phase', []) or [])
+
+        def _lli_is_bad(value):
+            try:
+                raw = int(value or 0)
+            except Exception:
+                raw = 0
+            # Bit 0: loss of lock/reset/cycle slip.  Bit 1: unresolved half cycle.
+            return bool(raw & 1) or (reject_half_cycle and bool(raw & 2))
+
+        def _pair_metrics(system_code, sat_data, freq_a, freq_b):
+            """Return usable samples and longest usable continuous arc for a pair."""
+            d_a = sat_data.get(freq_a, {}) or {}
+            d_b = sat_data.get(freq_b, {}) or {}
+            times_a = d_a.get('times', []) or []
+            times_b = d_b.get('times', []) or []
+            codes_a = d_a.get('code', []) or []
+            codes_b = d_b.get('code', []) or []
+            phases_a = d_a.get('phase', []) or []
+            phases_b = d_b.get('phase', []) or []
+            lli_a = d_a.get('phase_lli', []) or []
+            lli_b = d_b.get('phase_lli', []) or []
+            b_index = {time: index for index, time in enumerate(times_b)}
+            usable = 0
+            current_arc = 0
+            longest_arc = 0
+            previous_time = None
+
+            for index_a, time_a in enumerate(times_a):
+                index_b = b_index.get(time_a)
+                if index_b is None:
+                    for candidate, candidate_index in b_index.items():
+                        delta = _time_delta_seconds(time_a, candidate)
+                        if delta is not None and abs(delta) < 0.1:
+                            index_b = candidate_index
+                            break
+                valid = (
+                    index_b is not None
+                    and index_a < len(codes_a) and index_b < len(codes_b)
+                    and index_a < len(phases_a) and index_b < len(phases_b)
+                    and codes_a[index_a] is not None and codes_b[index_b] is not None
+                    and phases_a[index_a] is not None and phases_b[index_b] is not None
+                    and not _lli_is_bad(lli_a[index_a] if index_a < len(lli_a) else None)
+                    and not _lli_is_bad(lli_b[index_b] if index_b < len(lli_b) else None)
+                )
+                if not valid:
+                    current_arc = 0
+                    previous_time = None
+                    continue
+
+                if previous_time is not None:
+                    delta = _time_delta_seconds(time_a, previous_time)
+                    if delta is None or delta <= 0 or delta > arc_gap_seconds:
+                        current_arc = 0
+                current_arc += 1
+                usable += 1
+                longest_arc = max(longest_arc, current_arc)
+                previous_time = time_a
+            return usable, longest_arc
+
+        def _candidate_pairs(system_code, sat_data):
+            requested = freq_pair
+            if isinstance(requested, str):
+                if requested in ('', '自动选择', 'auto', 'None'):
+                    requested = None
+                else:
+                    requested = tuple(p.strip() for p in requested.split('+') if p.strip())
+            if requested is not None and len(requested) == 2:
+                a, b = requested
+                return [(a, b)]
+
+            pairs = list(preferred_pairs.get(system_code, []))
+            available = [f for f in sat_data if _has_valid_series(sat_data, f)]
+            seen = {tuple(sorted(pair)) for pair in pairs}
+            for idx, a in enumerate(available):
+                for b in available[idx + 1:]:
+                    key = tuple(sorted((a, b)))
+                    if key not in seen:
+                        seen.add(key)
+                        pairs.append((a, b))
+            return pairs
+
+        def _select_pair(system_code, sat_data):
+            candidates = _candidate_pairs(system_code, sat_data)
+            scored = []
+            for order, (a, b) in enumerate(candidates):
+                if a not in sat_data or b not in sat_data:
+                    continue
+                if not (_has_valid_series(sat_data, a) and _has_valid_series(sat_data, b)):
+                    continue
+                usable, longest = _pair_metrics(system_code, sat_data, a, b)
+                if longest >= min_arc_epochs:
+                    # Preserve preferred-pair order, then favor more usable data.
+                    scored.append((order, -longest, -usable, (a, b)))
+            if not scored:
+                return None
+            scored.sort(key=lambda item: (item[0], item[1], item[2]))
+            return scored[0][3]
+
+        def _select_pair_for_target(system_code, sat_data, target_freq, anchor_freqs):
+            """Select the best usable pair for one frequency not in the primary pair."""
+            candidates = _candidate_pairs(system_code, sat_data)
+            scored = []
+            for order, (a, b) in enumerate(candidates):
+                if target_freq not in (a, b):
+                    continue
+                if a not in sat_data or b not in sat_data:
+                    continue
+                if not (_has_valid_series(sat_data, a) and _has_valid_series(sat_data, b)):
+                    continue
+                usable, longest = _pair_metrics(system_code, sat_data, a, b)
+                if longest < min_arc_epochs:
+                    continue
+                uses_anchor = int(a in anchor_freqs or b in anchor_freqs)
+                # Prefer a pair sharing a primary frequency, then the longest
+                # continuous arc and the preferred-pair order.
+                scored.append((-uses_anchor, -longest, -usable, order, (a, b)))
+            if not scored:
+                return None
+            scored.sort(key=lambda item: item[:4])
+            return scored[0][4]
+
+        def _robust_mask(values):
+            array = np.asarray(values, dtype=float)
+            median = float(np.median(array))
+            deviations = np.abs(array - median)
+            mad = float(np.median(deviations))
+            scale = max(1.4826 * mad, mad_floor_m)
+            if scale <= 0 or mad_scale <= 0:
+                mask = np.ones(len(array), dtype=bool)
+            else:
+                mask = deviations <= mad_scale * scale
+            return median, mad, mask
+
+        for sat_id, sat_data in corrected.items():
+            system = sat_id[0] if sat_id else ''
+            pair = _select_pair(system, sat_data)
+            if not pair:
+                continue
+
+            freq1, freq2 = pair
+            d1 = sat_data.get(freq1, {}) or {}
+            d2 = sat_data.get(freq2, {}) or {}
+            times1 = d1.get('times', []) or []
+            times2 = d2.get('times', []) or []
+            code1 = d1.get('code', []) or []
+            code2 = d2.get('code', []) or []
+            phase1 = d1.get('phase', []) or []
+            phase2 = d2.get('phase', []) or []
+            lli1 = d1.get('phase_lli', []) or []
+            lli2 = d2.get('phase_lli', []) or []
+            f1 = _frequency(freq1, d1)
+            f2 = _frequency(freq2, d2)
+            if not f1 or not f2 or abs(f1 - f2) < 1e6:
+                continue
+
+            denom = f1 ** 2 - f2 ** 2
+            if abs(denom) < 1e-6:
+                continue
+            coeff_i = (f1 ** 2 + f2 ** 2) / denom
+            coeff_j = (2 * f2 ** 2) / denom
+            coeff_k = (2 * f1 ** 2) / denom
+
+            time2_idx = {t: j for j, t in enumerate(times2)}
+            correction_map = {
+                freq1: [None] * len(code1),
+                freq2: [None] * len(code2),
+            }
+            raw_mp_map = {
+                freq1: [None] * len(code1),
+                freq2: [None] * len(code2),
+            }
+            arc_records = []
+            current_arc = []
+            arc_counter = 0
+
+            def _add_detail(item, freq_name, original_code, raw_mp, bias, correction, corrected_code, status, arc_id):
+                detail_records.append({
+                    'sat_id': sat_id,
+                    'time': item.get('time'),
+                    'freq': freq_name,
+                    'pair': (freq1, freq2),
+                    'arc_id': arc_id,
+                    'original_code_m': original_code,
+                    'raw_mp_m': raw_mp,
+                    'arc_bias_m': bias,
+                    'correction_m': correction,
+                    'corrected_code_m': corrected_code,
+                    'status': status,
+                })
+
+            def _flush_arc():
+                nonlocal current_arc, arc_counter
+                if not current_arc:
+                    return
+                arc_counter += 1
+                arc_id = arc_counter
+                stats['arcs_seen'] += 1
+                if len(current_arc) < min_arc_epochs:
+                    stats['samples_skipped'] += len(current_arc)
+                    for item in current_arc:
+                        _add_detail(item, freq1, item.get('code1'), item['mp1'], None, None, item.get('code1'), 'short_arc', arc_id)
+                        _add_detail(item, freq2, item.get('code2'), item['mp2'], None, None, item.get('code2'), 'short_arc', arc_id)
+                    current_arc = []
+                    return
+
+                mp1_values = [item['mp1'] for item in current_arc]
+                mp2_values = [item['mp2'] for item in current_arc]
+                _, mad1, mask1 = _robust_mask(mp1_values)
+                _, mad2, mask2 = _robust_mask(mp2_values)
+                joint_mask = mask1 & mask2
+                if not np.any(joint_mask):
+                    stats['samples_skipped'] += len(current_arc)
+                    for item in current_arc:
+                        _add_detail(item, freq1, item.get('code1'), item['mp1'], None, None, item.get('code1'), 'robust_rejected', arc_id)
+                        _add_detail(item, freq2, item.get('code2'), item['mp2'], None, None, item.get('code2'), 'robust_rejected', arc_id)
+                    current_arc = []
+                    return
+
+                bias1 = float(np.median([v for v, ok in zip(mp1_values, joint_mask) if ok]))
+                bias2 = float(np.median([v for v, ok in zip(mp2_values, joint_mask) if ok]))
+                corrected_count = 0
+                for item, ok in zip(current_arc, joint_mask):
+                    if not ok:
+                        stats['samples_skipped'] += 1
+                        _add_detail(item, freq1, item.get('code1'), item['mp1'], bias1, None, item.get('code1'), 'robust_outlier', arc_id)
+                        _add_detail(item, freq2, item.get('code2'), item['mp2'], bias2, None, item.get('code2'), 'robust_outlier', arc_id)
+                        continue
+                    corr1 = gain * (item['mp1'] - bias1)
+                    corr2 = gain * (item['mp2'] - bias2)
+                    if max_correction_m > 0 and (abs(corr1) > max_correction_m or abs(corr2) > max_correction_m):
+                        stats['samples_skipped'] += 1
+                        _add_detail(item, freq1, item.get('code1'), item['mp1'], bias1, None, item.get('code1'), 'max_correction_rejected', arc_id)
+                        _add_detail(item, freq2, item.get('code2'), item['mp2'], bias2, None, item.get('code2'), 'max_correction_rejected', arc_id)
+                        continue
+                    correction_map[freq1][item['i1']] = corr1
+                    correction_map[freq2][item['i2']] = corr2
+                    _add_detail(item, freq1, item.get('code1'), item['mp1'], bias1, corr1, item.get('code1') - corr1, 'corrected', arc_id)
+                    _add_detail(item, freq2, item.get('code2'), item['mp2'], bias2, corr2, item.get('code2') - corr2, 'corrected', arc_id)
+                    corrected_count += 1
+                if corrected_count:
+                    stats['arcs_corrected'] += 1
+                    stats['samples_corrected'] += corrected_count * 2
+                    arc_records.append({
+                        'times': [item['time'] for item in current_arc],
+                        'raw_mp': {freq1: mp1_values[:], freq2: mp2_values[:]},
+                        'bias_m': {freq1: bias1, freq2: bias2},
+                        'mad_m': {freq1: mad1, freq2: mad2},
+                    })
+                current_arc = []
+
+            for i, t1 in enumerate(times1):
+                j = time2_idx.get(t1)
+                if j is None:
+                    for candidate, candidate_idx in time2_idx.items():
+                        delta = _time_delta_seconds(t1, candidate)
+                        if delta is not None and abs(delta) < 0.1:
+                            j = candidate_idx
+                            break
+                if j is None:
+                    _flush_arc()
+                    continue
+
+                c1 = code1[i] if i < len(code1) else None
+                c2 = code2[j] if j < len(code2) else None
+                l1 = phase1[i] if i < len(phase1) else None
+                l2 = phase2[j] if j < len(phase2) else None
+                lli_bad = bool((lli1[i] if i < len(lli1) and lli1[i] is not None else 0) & 1)
+                lli_bad = lli_bad or bool((lli2[j] if j < len(lli2) and lli2[j] is not None else 0) & 1)
+                if reject_half_cycle:
+                    lli_bad = lli_bad or bool((lli1[i] if i < len(lli1) and lli1[i] is not None else 0) & 2)
+                    lli_bad = lli_bad or bool((lli2[j] if j < len(lli2) and lli2[j] is not None else 0) & 2)
+
+                if current_arc:
+                    delta = _time_delta_seconds(t1, current_arc[-1]['time'])
+                    if delta is None or delta <= 0 or delta > arc_gap_seconds:
+                        _flush_arc()
+
+                if c1 is None or c2 is None or l1 is None or l2 is None or lli_bad:
+                    _flush_arc()
+                    if lli_bad:
+                        stats['samples_skipped'] += 1
+                    status = 'lli_rejected' if lli_bad else 'missing_observation'
+                    _add_detail({'time': t1}, freq1, c1, None, None, None, c1, status, None)
+                    _add_detail({'time': t1}, freq2, c2, None, None, None, c2, status, None)
+                    continue
+
+                mp1 = c1 - coeff_i * l1 + coeff_j * l2
+                mp2 = c2 - coeff_k * l1 + coeff_i * l2
+                raw_mp_map[freq1][i] = mp1
+                raw_mp_map[freq2][j] = mp2
+                current_arc.append({
+                    'i1': i, 'i2': j, 'time': t1,
+                    'code1': c1, 'code2': c2,
+                    'mp1': mp1, 'mp2': mp2,
+                })
+                stats['samples_considered'] += 2
+
+            _flush_arc()
+
+            for freq, corr_values in correction_map.items():
+                for index, correction in enumerate(corr_values):
+                    if correction is not None:
+                        original = corrected[sat_id][freq]['code'][index]
+                        if original is not None:
+                            corrected[sat_id][freq]['code'][index] = original - correction
+                if any(value is not None for value in corr_values):
+                    corrections.setdefault(sat_id, {})[freq] = {
+                        'times': (sat_data.get(freq, {}) or {}).get('times', [])[:],
+                        'correction_m': corr_values,
+                        'raw_mp_m': raw_mp_map[freq],
+                        'pair': (freq1, freq2),
+                    }
+
+            # For tri-frequency constellations, use an additional pair for
+            # the frequency omitted by the primary pair.  Only the omitted
+            # frequency is merged back; shared frequencies are never corrected
+            # twice.  This covers both BDS (L1P/L2I/L5P) and Galileo
+            # (L1C/L5Q/L7Q).
+            auto_pair = freq_pair is None or freq_pair in ('', '自动选择', 'auto', 'None')
+            additional_targets = {
+                'C': ['L1P', 'L2I', 'L5P'],
+                'E': ['L1C', 'L5Q', 'L7Q'],
+            }
+            if process_additional_pairs and auto_pair and system in additional_targets:
+                for target_freq in additional_targets[system]:
+                    if target_freq not in sat_data or target_freq in pair:
+                        continue
+                    secondary_pair = _select_pair_for_target(
+                        system, source_observations[sat_id], target_freq, set(pair)
+                    )
+                    if not secondary_pair:
+                        continue
+                    secondary = self.apply_pseudorange_multipath_correction(
+                        {sat_id: source_observations[sat_id]},
+                        freq_pair=secondary_pair,
+                        gain=gain,
+                        min_arc_epochs=min_arc_epochs,
+                        arc_gap_seconds=arc_gap_seconds,
+                        mad_scale=mad_scale,
+                        mad_floor_m=mad_floor_m,
+                        max_correction_m=max_correction_m,
+                        reject_half_cycle=reject_half_cycle,
+                        process_additional_pairs=False,
+                    )
+                    secondary_details = [
+                        item for item in secondary.get('details', [])
+                        if item.get('freq') == target_freq
+                    ]
+                    detail_records.extend(secondary_details)
+                    stats['samples_considered'] += sum(
+                        item.get('raw_mp_m') is not None for item in secondary_details
+                    )
+                    stats['samples_skipped'] += sum(
+                        item.get('raw_mp_m') is not None and item.get('status') != 'corrected'
+                        for item in secondary_details
+                    )
+                    stats['arcs_seen'] += secondary.get('stats', {}).get('arcs_seen', 0)
+                    stats['arcs_corrected'] += secondary.get('stats', {}).get('arcs_corrected', 0)
+
+                    secondary_correction = secondary.get('corrections', {}).get(sat_id, {}).get(target_freq)
+                    if not secondary_correction:
+                        continue
+                    target_corrections = secondary_correction.get('correction_m', []) or []
+                    original_codes = source_observations[sat_id].get(target_freq, {}).get('code', []) or []
+                    corrected_codes = corrected[sat_id].get(target_freq, {}).get('code', []) or []
+                    for index, correction in enumerate(target_corrections):
+                        if correction is not None and index < len(original_codes) and index < len(corrected_codes):
+                            if original_codes[index] is not None:
+                                corrected_codes[index] = original_codes[index] - correction
+                    corrections.setdefault(sat_id, {})[target_freq] = secondary_correction
+                    stats['samples_corrected'] += sum(value is not None for value in target_corrections)
+
+            if sat_id in corrections:
+                stats['satellites_corrected'] += 1
+                log_lines.append(
+                    f'{sat_id} {freq1}+{freq2}: '
+                    f'改正 {sum(1 for f in corrections[sat_id].values() for v in f["correction_m"] if v is not None)} 个频率观测'
+                )
+
+        log_lines.extend([
+            '',
+            '统计:',
+            f'参与卫星数: {stats["satellites_seen"]}',
+            f'完成改正卫星数: {stats["satellites_corrected"]}',
+            f'连续弧段: {stats["arcs_corrected"]}/{stats["arcs_seen"]}',
+            f'改正频率观测数: {stats["samples_corrected"]}',
+            f'跳过样本数: {stats["samples_skipped"]}',
+            '',
+            '逐历元改正详情:',
+            '字段: 卫星 | 时间 | 频率 | 频率对 | 原始伪距(m) | MP原始(m) | 弧段基准(m) | 改正量(m) | 改正后伪距(m) | 状态',
+        ])
+        for detail in detail_records:
+            time_text = str(detail.get('time', ''))
+            pair_text = '+'.join(detail.get('pair', ()))
+            def _fmt(value):
+                return 'NA' if value is None else f'{float(value):.4f}'
+            log_lines.append(
+                f'{detail["sat_id"]} | {time_text} | {detail["freq"]} | {pair_text} | '
+                f'{_fmt(detail.get("original_code_m"))} | {_fmt(detail.get("raw_mp_m"))} | '
+                f'{_fmt(detail.get("arc_bias_m"))} | {_fmt(detail.get("correction_m"))} | '
+                f'{_fmt(detail.get("corrected_code_m"))} | {detail.get("status", "unknown")}'
+            )
+        return {
+            'corrected_observations': corrected,
+            'corrections': corrections,
+            'details': detail_records,
+            'stats': stats,
+            'parameters': {
+                'freq_pair': freq_pair,
+                'gain': gain,
+                'min_arc_epochs': min_arc_epochs,
+                'arc_gap_seconds': arc_gap_seconds,
+                'mad_scale': mad_scale,
+                'mad_floor_m': mad_floor_m,
+                'max_correction_m': max_correction_m,
+                'reject_half_cycle': bool(reject_half_cycle),
+            },
+            'log': '\n'.join(log_lines),
+        }
+
     def apply_doppler_smoothing(self, observations_meters: Dict[str, Any], 
                                 max_window: int = 20, 
                                 reset_threshold_m: float = 15.0,
@@ -1120,8 +1624,20 @@ class CoreAlgorithmProcessor:
                                      wavelengths: Dict[str, Dict[str, float]], 
                                      original_rinex_path: str = None,
                                      output_path: str = None,
-                                     writer: Optional[RinexWriter] = None) -> Dict[str, Any]:
-        """Perform Doppler-based phase prediction to repair cycle slips/gaps."""
+                                     writer: Optional[RinexWriter] = None,
+                                     max_prediction_length: int = 5,
+                                     max_interval_factor: float = 1.5,
+                                     real_phase_sigma_m: float = 0.03,
+                                     first_prediction_sigma_m: float = 0.10,
+                                     sigma_growth_m: float = 0.05,
+                                     reject_active_lli: bool = True) -> Dict[str, Any]:
+        """Fill short phase gaps by trapezoidal integration of Doppler.
+
+        ``observations_meters['doppler']`` is already ``-D_RINEX * wavelength``
+        (phase range-rate in m/s), so it is integrated with a positive sign.
+        Prediction uncertainty is exported as metadata for a future PPP reader;
+        it is deliberately not encoded into RINEX LLI/SSI fields.
+        """
         
         prediction_results = {
             'predicted_phases': {},
@@ -1129,7 +1645,17 @@ class CoreAlgorithmProcessor:
             'correction_log': [],
             'total_missing': 0,
             'total_predicted': 0,
-            'sv_missing_stats': {} # {sv: {'missing': N, 'predicted': M}}
+            'sv_missing_stats': {}, # {sv: {'missing': N, 'predicted': M}}
+            'metadata_records': [],
+            'parameters': {
+                'max_prediction_length': int(max_prediction_length),
+                'max_interval_factor': float(max_interval_factor),
+                'real_phase_sigma_m': float(real_phase_sigma_m),
+                'first_prediction_sigma_m': float(first_prediction_sigma_m),
+                'sigma_growth_m': float(sigma_growth_m),
+                'reject_active_lli': bool(reject_active_lli),
+                'doppler_convention': '-D_RINEX*wavelength_mps',
+            },
         }
         
         for sat_id, sat_obs in observations_meters.items():
@@ -1143,9 +1669,11 @@ class CoreAlgorithmProcessor:
                 if 'phase' not in freq_data or 'doppler' not in freq_data:
                     continue
                 
-                phase_values = freq_data['phase'] # List of cycles
+                original_phase_values = list(freq_data['phase'])
+                phase_values = list(original_phase_values)
                 doppler_values = freq_data['doppler'] # m/s
                 times = freq_data['times']
+                lli_values = freq_data.get('phase_lli', []) or []
                 
                 if not (len(phase_values) == len(doppler_values) == len(times)):
                     continue
@@ -1166,19 +1694,48 @@ class CoreAlgorithmProcessor:
                     'prediction_details': []
                 }
                 missing_epochs = []
+                prediction_lengths = [0] * len(times)
+                positive_intervals = []
+                for interval_idx in range(1, len(times)):
+                    try:
+                        interval = (times[interval_idx] - times[interval_idx - 1]).total_seconds()
+                    except Exception:
+                        continue
+                    if interval > 0:
+                        positive_intervals.append(interval)
+                nominal_interval = float(np.median(positive_intervals)) if positive_intervals else None
                 
                 for i in range(len(times)):
-                    if phase_values[i] is None or phase_values[i] == 0:
+                    if phase_values[i] is None:
                         missing_epochs.append(i)
                         sv_stats['missing'] += 1
-                        
+                        prediction_length = prediction_lengths[i - 1] + 1 if i > 0 else 1
+                        rejection_reason = None
+                        if prediction_length > max_prediction_length:
+                            rejection_reason = 'max_prediction_length'
+                        if reject_active_lli and i > 0 and i - 1 < len(lli_values):
+                            try:
+                                if lli_values[i - 1] is not None and (int(lli_values[i - 1]) & 1):
+                                    rejection_reason = 'active_lli'
+                            except (TypeError, ValueError):
+                                pass
+
                         predicted_phase_m = self._predict_phase_at_epoch(
-                            i, times, phase_values, doppler_values, frequency, wavelength
-                        )
+                            i, times, phase_values, doppler_values, frequency, wavelength,
+                            nominal_interval=nominal_interval,
+                            max_interval_factor=max_interval_factor,
+                        ) if rejection_reason is None else None
+                        if predicted_phase_m is None and rejection_reason is None:
+                            rejection_reason = 'missing_doppler_or_time_gap'
                         
                         if predicted_phase_m is not None:
-                            phase_values[i] = predicted_phase_m 
+                            phase_values[i] = predicted_phase_m
+                            prediction_lengths[i] = prediction_length
                             sv_stats['predicted'] += 1
+                            sigma_m = max(
+                                real_phase_sigma_m,
+                                first_prediction_sigma_m + (prediction_length - 1) * sigma_growth_m,
+                            )
                             
                             freq_prediction['times'].append(times[i])
                             freq_prediction['original_phases'].append(None)
@@ -1192,11 +1749,32 @@ class CoreAlgorithmProcessor:
                                 'freq': freq,
                                 'time': times[i],
                                 'predicted_phase_cycle': predicted_phase_m / wavelength,
-                                'predicted_phase_m': predicted_phase_m
+                                'predicted_phase_m': predicted_phase_m,
+                                'prediction_length': prediction_length,
+                                'sigma_m': sigma_m,
+                                'source': 'doppler_forward',
                             }
                             freq_prediction['prediction_details'].append(detail)
                             prediction_results['correction_log'].append(detail)
                             prediction_results['total_predicted'] += 1
+                            prediction_results['metadata_records'].append({
+                                **detail,
+                                'time': times[i].isoformat() if hasattr(times[i], 'isoformat') else str(times[i]),
+                                'accepted': True,
+                                'status': 'predicted',
+                            })
+                        else:
+                            prediction_results['metadata_records'].append({
+                                'epoch_idx': i,
+                                'sat_id': sat_id,
+                                'freq': freq,
+                                'time': times[i].isoformat() if hasattr(times[i], 'isoformat') else str(times[i]),
+                                'prediction_length': prediction_length,
+                                'sigma_m': None,
+                                'source': 'doppler_forward',
+                                'accepted': False,
+                                'status': rejection_reason or 'not_predictable',
+                            })
                     else:
                         freq_prediction['times'].append(times[i])
                         freq_prediction['original_phases'].append(phase_values[i])
@@ -1204,6 +1782,9 @@ class CoreAlgorithmProcessor:
                         freq_prediction['is_predicted'].append(False)
                         
                 sat_prediction[freq] = freq_prediction
+                freq_prediction['original_phase_m'] = original_phase_values
+                freq_prediction['filled_phase_m'] = phase_values
+                freq_prediction['prediction_lengths'] = prediction_lengths
                 sat_missing_epochs[freq] = missing_epochs
                 prediction_results['total_missing'] += len(missing_epochs)
             
@@ -1215,12 +1796,15 @@ class CoreAlgorithmProcessor:
                 prediction_results['missing_epochs'][sat_id] = sat_missing_epochs
 
         if output_path and writer and original_rinex_path:
-             writer.write_doppler_predicted_rinex(original_rinex_path, output_path, prediction_results)
+             prediction_results['writer_result'] = writer.write_doppler_predicted_rinex(
+                 original_rinex_path, output_path, prediction_results
+             )
              
         return prediction_results
 
     def _predict_phase_at_epoch(self, target_idx, times, phase_values, doppler_values,
-                                frequency, wavelength):
+                                frequency, wavelength, nominal_interval=None,
+                                max_interval_factor=1.5):
         """Helper: predict phase (meters) at target index using neighbor doppler values."""
         if target_idx <= 0: return None
         prev_phase_m = phase_values[target_idx - 1] # in meters
@@ -1235,12 +1819,12 @@ class CoreAlgorithmProcessor:
         except:
             return None
         if time_diff <= 0: return None
+        if nominal_interval and max_interval_factor > 0 and time_diff > nominal_interval * max_interval_factor:
+            return None
         
-        # Physics: dPhi_m = -range_rate * dt
-        # Range rate dot(rho) is stored in doppler_values.
-        # Phase (meters) decreases as range increases, so dPhi = -dRho.
+        # reader.py stores -D_RINEX*wavelength, i.e. carrier-phase range-rate.
         doppler_mean = (prev_doppler + curr_doppler) / 2.0
-        phase_change_m = -doppler_mean * time_diff
+        phase_change_m = doppler_mean * time_diff
         
         predicted_phase_m = prev_phase_m + phase_change_m
         return predicted_phase_m

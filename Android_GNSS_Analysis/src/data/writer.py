@@ -828,6 +828,28 @@ class RinexWriter:
         modified_satellites = set()
 
         predicted_phases = prediction_results.get('predicted_phases', {})
+        epoch_headers = []
+        for line_idx, line in enumerate(output_lines):
+            if not line.startswith('>'):
+                continue
+            parts = line[1:].split()
+            epoch_time = None
+            if len(parts) >= 6:
+                try:
+                    second = float(parts[5])
+                    whole_second = int(second)
+                    microsecond = int(round((second - whole_second) * 1_000_000))
+                    if microsecond >= 1_000_000:
+                        whole_second += 1
+                        microsecond -= 1_000_000
+                    epoch_time = datetime.datetime(
+                        int(parts[0]), int(parts[1]), int(parts[2]),
+                        int(parts[3]), int(parts[4]), whole_second, microsecond,
+                    )
+                except (TypeError, ValueError, OverflowError):
+                    epoch_time = None
+            epoch_headers.append((line_idx, epoch_time))
+
         # iterate predictions
         for sat_id, sat_data in predicted_phases.items():
             sat_system = sat_id[0]
@@ -843,50 +865,48 @@ class RinexWriter:
                 # attempt to get wavelength from predicted data if present
                 # prediction_details entries may include predicted_phase_cycle and optionally time; wavelengths may not be present
                 for detail in freq_data.get('prediction_details', []):
-                    epoch_indices = detail.get('epoch_indices')  # ✅ 使用epoch_indices替代计数器
                     epoch_idx = detail.get('epoch_idx')
                     predicted_phase_cycle = detail.get('predicted_phase_cycle')
                     epoch_time = detail.get('time')
                     if predicted_phase_cycle is None:
                         continue
-                    # find epoch index (0-based) in file using epoch_indices
-                    current_epoch = -1
-                    for line_idx, line in enumerate(output_lines):
-                        if line.startswith('>'):
-                            current_epoch += 1
-                            # ✅ 同时检查epoch_indices和时间戳，双重验证确保正确性
-                            if current_epoch == epoch_indices:
+                    matched_header = None
+                    for line_idx, parsed_time in epoch_headers:
+                        if epoch_time is not None and parsed_time is not None:
+                            try:
+                                if abs((parsed_time - epoch_time).total_seconds()) <= 0.001:
+                                    matched_header = line_idx
+                                    break
+                            except TypeError:
+                                pass
+                    if matched_header is not None:
+                        line_idx = matched_header
                                 # find satellite line
-                                j = line_idx + 1
-                                while j < len(output_lines) and not output_lines[j].startswith('>'):
-                                    sat_line = output_lines[j]
-                                    if len(sat_line) >= 3 and sat_line[0] == sat_system and sat_line[1:3].strip().zfill(2) == sat_prn:
-                                        # apply predicted phase - similar to analyzer's helper
-                                        line = sat_line.rstrip('\n')
-                                        if len(line) < 3:
-                                            break
-                                        field_start = 3 + phase_field_idx * 16
-                                        field_end = field_start + 16
-                                        if len(line) < field_end:
-                                            line = line.ljust(field_end)
-                                        original_segment = line[field_start:field_end]
-                                        _, original_lli, original_ssi = self._extract_phase_and_lli_from_segment(original_segment)
-                                        phase_segment = self._format_phase_segment(predicted_phase_cycle, original_lli, original_ssi)
-                                        modified_line = line[:field_start] + phase_segment + line[field_end:]
-                                        output_lines[j] = modified_line
-                                        mod_detail = {
-                                            'sat_id': sat_id,
-                                            'freq': freq,
-                                            'epoch_idx': epoch_idx,
-                                            'predicted_phase_cycle': predicted_phase_cycle,
-                                            'lli': original_lli
-                                        }
-                                        modification_details.append(mod_detail)
-                                        total_modifications += 1
-                                        modified_satellites.add(sat_id)
-                                        break
-                                    j += 1
+                        j = line_idx + 1
+                        while j < len(output_lines) and not output_lines[j].startswith('>'):
+                            sat_line = output_lines[j]
+                            if len(sat_line) >= 3 and sat_line[0] == sat_system and sat_line[1:3].strip().zfill(2) == sat_prn:
+                                line = sat_line.rstrip('\n')
+                                field_start = 3 + phase_field_idx * 16
+                                field_end = field_start + 16
+                                if len(line) < field_end:
+                                    line = line.ljust(field_end)
+                                original_segment = line[field_start:field_end]
+                                _, original_lli, original_ssi = self._extract_phase_and_lli_from_segment(original_segment)
+                                phase_segment = self._format_phase_segment(predicted_phase_cycle, original_lli, original_ssi)
+                                output_lines[j] = line[:field_start] + phase_segment + line[field_end:]
+                                modification_details.append({
+                                    'sat_id': sat_id,
+                                    'freq': freq,
+                                    'epoch_idx': epoch_idx,
+                                    'time': str(epoch_time),
+                                    'predicted_phase_cycle': predicted_phase_cycle,
+                                    'lli': original_lli,
+                                })
+                                total_modifications += 1
+                                modified_satellites.add(sat_id)
                                 break
+                            j += 1
 
         # write output
         dirpath = os.path.dirname(output_path) or '.'
@@ -1020,6 +1040,147 @@ class RinexWriter:
             f.writelines([line if line.endswith('\n') else line + '\n' for line in output_lines])
 
         return {'output_path': output_path, 'modification_details': modification_details, 'total_modifications': total_modifications, 'modified_satellites': list(modified_satellites)}
+
+    def write_pseudorange_multipath_corrected_rinex(
+            self,
+            original_path: str,
+            output_path: Optional[str],
+            corrections: Dict[str, Any]) -> Dict[str, Any]:
+        """Write a RINEX copy with per-epoch pseudorange corrections applied.
+
+        ``corrections`` is keyed as ``{sat_id: {freq: {'times': [...],
+        'correction_m': [...]}}}``.  Only code fields are changed; phase,
+        Doppler, SNR and LLI fields are preserved byte-for-byte where possible.
+        """
+        if output_path is None:
+            base_dir = os.path.dirname(original_path)
+            bn = os.path.basename(original_path)
+            name, ext = os.path.splitext(bn)
+            output_path = os.path.join(base_dir, f"{name}-multipath corrected{ext}")
+
+        with open(original_path, 'r', encoding='utf-8') as f:
+            lines = [line.rstrip('\n') for line in f]
+
+        header_end = next((i for i, line in enumerate(lines) if 'END OF HEADER' in line), -1)
+        if header_end < 0:
+            raise ValueError('RINEX header does not contain END OF HEADER')
+
+        system_obs_info = {}
+        i = 0
+        while i < header_end:
+            line = lines[i]
+            if 'SYS / # / OBS TYPES' in line:
+                system = line[0]
+                try:
+                    num_types = int(line[3:6].strip())
+                except Exception:
+                    num_types = 0
+                # Observation descriptors occupy columns 7-60; parsing only
+                # that area avoids treating the trailing label as a descriptor.
+                obs_types = line[6:60].split()
+                j = i + 1
+                while j < header_end and len(obs_types) < num_types:
+                    continuation = lines[j]
+                    if 'SYS / # / OBS TYPES' in continuation and continuation[0] == ' ':
+                        obs_types.extend(continuation[6:60].split())
+                        j += 1
+                    else:
+                        break
+                obs_types = obs_types[:num_types] if num_types > 0 else obs_types
+                freq_to_indices = defaultdict(dict)
+                for index, obs_type in enumerate(obs_types):
+                    if obs_type.startswith('C'):
+                        freq_to_indices[f'L{obs_type[1:]}']['code'] = index
+                system_obs_info[system] = {'freq_to_indices': freq_to_indices}
+            i += 1
+
+        def _time_key(value):
+            if value is None:
+                return None
+            try:
+                return int(value.value // 1_000_000)
+            except Exception:
+                return str(value)
+
+        correction_lookup = {}
+        for sat_id, freq_map in (corrections or {}).items():
+            for freq, data in (freq_map or {}).items():
+                times = data.get('times', []) or []
+                values = data.get('correction_m', []) or []
+                correction_lookup[(sat_id, freq)] = {
+                    _time_key(time): value
+                    for time, value in zip(times, values)
+                    if _time_key(time) is not None and value is not None
+                }
+
+        output_lines = lines[:]
+        modification_details = {}
+        total_modifications = 0
+        current_epoch_time = None
+
+        for line_index in range(header_end + 1, len(lines)):
+            line = output_lines[line_index]
+            if line.startswith('>'):
+                parts = line[1:].split()
+                if len(parts) >= 6:
+                    try:
+                        secf = float(parts[5])
+                        current_epoch_time = pd.Timestamp(
+                            year=int(parts[0]), month=int(parts[1]), day=int(parts[2]),
+                            hour=int(parts[3]), minute=int(parts[4]),
+                            second=int(secf),
+                            microsecond=int((secf - int(secf)) * 1000000),
+                        )
+                    except Exception:
+                        current_epoch_time = None
+                continue
+
+            if current_epoch_time is None or len(line) < 3 or not line[0].isalpha():
+                continue
+
+            sat_id = f'{line[0]}{line[1:3].strip().zfill(2)}'
+            if sat_id not in corrections or line[0] not in system_obs_info:
+                continue
+
+            epoch_key = _time_key(current_epoch_time)
+            updated_line = line
+            freq_indices = system_obs_info[line[0]]['freq_to_indices']
+            for freq, data in corrections[sat_id].items():
+                correction = correction_lookup.get((sat_id, freq), {}).get(epoch_key)
+                if correction is None or freq not in freq_indices or 'code' not in freq_indices[freq]:
+                    continue
+                code_index = freq_indices[freq]['code']
+                start = 3 + code_index * 16
+                end = start + 16
+                field = updated_line[start:end].ljust(16)
+                raw_code = field[:14].strip()
+                try:
+                    original_code = float(raw_code) if raw_code else None
+                except Exception:
+                    original_code = None
+                if original_code is None:
+                    continue
+                corrected_code = original_code - float(correction)
+                replacement = f'{corrected_code:14.3f}' + field[14:]
+                updated_line = updated_line[:start] + replacement + updated_line[end:]
+                modification_details[f'{sat_id} {current_epoch_time} {freq}'] = {
+                    'original_code': original_code,
+                    'correction_m': float(correction),
+                    'corrected_code': corrected_code,
+                }
+                total_modifications += 1
+            output_lines[line_index] = updated_line
+
+        os.makedirs(os.path.dirname(output_path) or '.', exist_ok=True)
+        with open(output_path, 'w', encoding='utf-8') as f:
+            f.writelines(line + '\n' for line in output_lines)
+
+        return {
+            'output_path': output_path,
+            'modification_details': modification_details,
+            'total_modifications': total_modifications,
+            'modified_satellites': sorted({key.split(' ')[0] for key in modification_details}),
+        }
 
     def write_doppler_smoothed_rinex(self, original_path: str, output_path: Optional[str], smoothed_observations: Dict[str, Any]) -> Dict[str, Any]:
         """Write a RINEX file with Doppler-smoothed pseudorange values.

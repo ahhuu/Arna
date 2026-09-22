@@ -36,6 +36,86 @@ class CycleSlipDetector:
         self.use_custom_threshold = use_custom_threshold
         self.custom_mw_threshold = custom_mw_threshold or 10  # 默认10米
         self.custom_gf_threshold = custom_gf_threshold or 0.05  # 默认0.05米
+
+    @staticmethod
+    def _time_delta_seconds(later: Any, earlier: Any) -> Optional[float]:
+        """Return a time difference in seconds for datetime-like or numeric epochs."""
+        try:
+            delta = later - earlier
+            if hasattr(delta, 'total_seconds'):
+                return float(delta.total_seconds())
+            return float(delta)
+        except (TypeError, ValueError, OverflowError):
+            return None
+
+    def _aligned_valid_samples(self, data1: Dict[str, Any], data2: Dict[str, Any],
+                               fields: Tuple[str, ...]) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+        """Align two frequencies by time and start a new arc after missing data or gaps."""
+        times1 = data1.get('times', []) or []
+        times2 = data2.get('times', []) or []
+        index2_by_time = {t: i for i, t in enumerate(times2)}
+        aligned = []
+        common_count = 0
+
+        for i1, time_value in enumerate(times1):
+            i2 = index2_by_time.get(time_value)
+            if i2 is None:
+                continue
+            common_count += 1
+            values = {}
+            valid = True
+            for field in fields:
+                values1 = data1.get(field, []) or []
+                values2 = data2.get(field, []) or []
+                value1 = values1[i1] if i1 < len(values1) else None
+                value2 = values2[i2] if i2 < len(values2) else None
+                values[field] = (value1, value2)
+                valid = valid and value1 is not None and value2 is not None
+            if valid:
+                aligned.append({'time': time_value, 'epoch': i1 + 1,
+                                'index1': i1, 'index2': i2, 'values': values})
+
+        common_times = [t for t in times1 if t in index2_by_time]
+        time_steps = []
+        for previous, current in zip(common_times, common_times[1:]):
+            step = self._time_delta_seconds(current, previous)
+            if step is not None and step > 0:
+                time_steps.append(step)
+        nominal_interval = float(np.median(time_steps)) if time_steps else None
+
+        arc_id = -1
+        arc_breaks = []
+        previous = None
+        for sample in aligned:
+            reason = None
+            if previous is None:
+                reason = 'start'
+            elif (sample['index1'] != previous['index1'] + 1 or
+                  sample['index2'] != previous['index2'] + 1):
+                reason = 'missing_observation'
+            else:
+                step = self._time_delta_seconds(sample['time'], previous['time'])
+                if (step is not None and nominal_interval is not None and
+                        step > nominal_interval * 1.5):
+                    reason = 'time_gap'
+            if reason is not None:
+                arc_id += 1
+                if previous is not None:
+                    arc_breaks.append({'epoch': sample['epoch'], 'time': sample['time'],
+                                       'reason': reason})
+            sample['arc_id'] = arc_id
+            previous = sample
+
+        diagnostics = {
+            'total_common_epochs': common_count,
+            'valid_epochs': len(aligned),
+            'missing_epochs': common_count - len(aligned),
+            'unaligned_epochs': len(set(times1).symmetric_difference(set(times2))),
+            'arc_count': arc_id + 1 if aligned else 0,
+            'arc_breaks': arc_breaks,
+            'nominal_interval_seconds': nominal_interval,
+        }
+        return aligned, diagnostics
         
     def detect_cycle_slips(self, observations: Dict[str, Any], 
                           frequencies: Dict[str, Dict[str, float]],
@@ -216,16 +296,12 @@ class CycleSlipDetector:
         data1 = sat_data.get(freq1, {})
         data2 = sat_data.get(freq2, {})
         
-        times1 = data1.get('times', [])
-        times2 = data2.get('times', [])
-        code1 = data1.get('code', [])
-        code2 = data2.get('code', [])
-        phase1 = data1.get('phase_cycle', []) or data1.get('phase', [])
-        phase2 = data2.get('phase_cycle', []) or data2.get('phase', [])
-        
-        # 确保数据长度一致
-        n = min(len(times1), len(times2), len(code1), len(code2), len(phase1), len(phase2))
-        if n < 3:
+        data1 = dict(data1)
+        data2 = dict(data2)
+        data1['_phase'] = data1.get('phase_cycle', []) or data1.get('phase', [])
+        data2['_phase'] = data2.get('phase_cycle', []) or data2.get('phase', [])
+        samples, diagnostics = self._aligned_valid_samples(data1, data2, ('code', '_phase'))
+        if len(samples) < 3:
             return {'error': 'Insufficient data for MW detection'}
         
         # 计算宽巷波长
@@ -234,21 +310,16 @@ class CycleSlipDetector:
         # 计算MW观测值 Nw
         nw_series = []
         valid_epochs = []
-        for i in range(n):
-            if (code1[i] is not None and code2[i] is not None and 
-                phase1[i] is not None and phase2[i] is not None):
-                # L_i 和 L_j 单位需要是米
-                L1_m = phase1[i] * lambda1
-                L2_m = phase2[i] * lambda2
-                P1_m = code1[i]
-                P2_m = code2[i]
-                
-                # MW组合公式
-                L_mw = (f1 * L1_m - f2 * L2_m) / (f1 - f2) - (f1 * P1_m + f2 * P2_m) / (f1 + f2)
-                nw = L_mw / lambda_w
-                
-                nw_series.append(nw)
-                valid_epochs.append(i + 1)
+        arc_ids = []
+        for sample in samples:
+            P1_m, P2_m = sample['values']['code']
+            phase1, phase2 = sample['values']['_phase']
+            L1_m = phase1 * lambda1
+            L2_m = phase2 * lambda2
+            L_mw = (f1 * L1_m - f2 * L2_m) / (f1 - f2) - (f1 * P1_m + f2 * P2_m) / (f1 + f2)
+            nw_series.append(L_mw / lambda_w)
+            valid_epochs.append(sample['epoch'])
+            arc_ids.append(sample['arc_id'])
         
         if len(nw_series) < 3:
             return {'error': 'Insufficient valid observations for MW'}
@@ -272,6 +343,15 @@ class CycleSlipDetector:
         delta_mw.append(0.0)
         
         for i in range(1, len(nw_series)):
+            if arc_ids[i] != arc_ids[i - 1]:
+                mean_nw = nw_series[i]
+                sigma2_nw = 0.0
+                k = 1
+                delta_mw.append(0.0)
+                mean_history.append(mean_nw)
+                sigma_history.append(0.0)
+                threshold_history.append(0.0)
+                continue
             # 计算与前一历元均值的差异
             delta = abs(nw_series[i] - mean_nw)
             delta_mw.append(delta)
@@ -287,7 +367,7 @@ class CycleSlipDetector:
             is_anomaly = False
             if k > 1 and delta >= threshold:
                 # 检查是否是周跳或粗差
-                if i < len(nw_series) - 1:
+                if i < len(nw_series) - 1 and arc_ids[i + 1] == arc_ids[i]:
                     delta_next = abs(nw_series[i] - nw_series[i + 1])
                     if delta_next <= 1.0:
                         cycle_slips.append({
@@ -341,7 +421,9 @@ class CycleSlipDetector:
             'outliers': outliers,
             'lambda_w': lambda_w,
             'threshold_mode': 'custom' if self.use_custom_threshold else 'dynamic',
-            'threshold_value': self.custom_mw_threshold if self.use_custom_threshold else None
+            'threshold_value': self.custom_mw_threshold if self.use_custom_threshold else None,
+            'diagnostics': diagnostics,
+            'arc_ids': arc_ids
         }
     
     def _detect_gf(self, sat_data: Dict[str, Any], freq1: str, freq2: str,
@@ -361,25 +443,23 @@ class CycleSlipDetector:
         data1 = sat_data.get(freq1, {})
         data2 = sat_data.get(freq2, {})
         
-        times1 = data1.get('times', [])
-        times2 = data2.get('times', [])
-        phase1 = data1.get('phase_cycle', []) or data1.get('phase', [])
-        phase2 = data2.get('phase_cycle', []) or data2.get('phase', [])
-        
-        # 确保数据长度一致
-        n = min(len(times1), len(times2), len(phase1), len(phase2))
-        if n < 3:
+        data1 = dict(data1)
+        data2 = dict(data2)
+        data1['_phase'] = data1.get('phase_cycle', []) or data1.get('phase', [])
+        data2['_phase'] = data2.get('phase_cycle', []) or data2.get('phase', [])
+        samples, diagnostics = self._aligned_valid_samples(data1, data2, ('_phase',))
+        if len(samples) < 2:
             return {'error': 'Insufficient data for GF detection'}
         
         # 计算GF观测值
         gf_series = []
         valid_epochs = []
-        for i in range(n):
-            if phase1[i] is not None and phase2[i] is not None:
-                # GF = L1 - L2 (单位：米)
-                gf = lambda1 * phase1[i] - lambda2 * phase2[i]
-                gf_series.append(gf)
-                valid_epochs.append(i + 1)
+        arc_ids = []
+        for sample in samples:
+            phase1, phase2 = sample['values']['_phase']
+            gf_series.append(lambda1 * phase1 - lambda2 * phase2)
+            valid_epochs.append(sample['epoch'])
+            arc_ids.append(sample['arc_id'])
         
         if len(gf_series) < 2:
             return {'error': 'Insufficient valid observations for GF'}
@@ -393,7 +473,9 @@ class CycleSlipDetector:
         # 计算GF序列的标准差用于自适应阈值
         if len(gf_series) > 10:
             # 使用前10个历元估计标准差
-            gf_diffs = [gf_series[i] - gf_series[i-1] for i in range(1, min(11, len(gf_series)))]
+            gf_diffs = [gf_series[i] - gf_series[i-1]
+                        for i in range(1, min(11, len(gf_series)))
+                        if arc_ids[i] == arc_ids[i - 1]]
             sigma_gf = np.std(gf_diffs) if gf_diffs else 0.1
         else:
             sigma_gf = 0.1
@@ -405,6 +487,9 @@ class CycleSlipDetector:
             threshold = self.gf_k_sigma * sigma_gf + self.delta_i_max
         
         for i in range(1, len(gf_series)):
+            if arc_ids[i] != arc_ids[i - 1]:
+                delta_gf.append(0.0)
+                continue
             delta = abs(gf_series[i] - gf_series[i - 1])
             delta_gf.append(delta)
             
@@ -426,7 +511,9 @@ class CycleSlipDetector:
             'cycle_slips': cycle_slips,
             'sigma_gf': sigma_gf,
             'threshold_mode': 'custom' if self.use_custom_threshold else 'dynamic',
-            'threshold_value': self.custom_gf_threshold if self.use_custom_threshold else None
+            'threshold_value': self.custom_gf_threshold if self.use_custom_threshold else None,
+            'diagnostics': diagnostics,
+            'arc_ids': arc_ids
         }
 
     def _detect_lli(self, sat_data: Dict[str, Any]) -> Dict[str, Any]:
@@ -460,6 +547,7 @@ class CycleSlipDetector:
         lli_raw_by_freq = {fn: [] for fn in lli_freqs}
         bit0_by_freq = {fn: [] for fn in lli_freqs}
         bit1_by_freq = {fn: [] for fn in lli_freqs}
+        lli_known_by_freq = {fn: [] for fn in lli_freqs}
         lock_loss_union = []
         half_cycle_union = []
 
@@ -473,12 +561,14 @@ class CycleSlipDetector:
                 fd = sat_data.get(fn, {})
                 lli_list = fd.get('phase_lli', []) or []
                 times = fd.get('times', []) or []
-                raw = int(lli_list[i]) if i < len(lli_list) and lli_list[i] is not None else 0
+                known = i < len(lli_list) and lli_list[i] is not None
+                raw = int(lli_list[i]) if known else None
                 lli_by_freq[fn] = raw
                 lli_raw_by_freq[fn].append(raw)
+                lli_known_by_freq[fn].append(known)
 
-                b0 = 1 if (raw & 1) != 0 else 0
-                b1 = 1 if (raw & 2) != 0 else 0
+                b0 = 1 if raw is not None and (raw & 1) != 0 else 0
+                b1 = 1 if raw is not None and (raw & 2) != 0 else 0
                 bit0_by_freq[fn].append(b0)
                 bit1_by_freq[fn].append(b1)
                 lock_loss_any = lock_loss_any or (b0 == 1)
@@ -493,7 +583,10 @@ class CycleSlipDetector:
             half_cycle_flag = 1 if half_cycle_any else 0
             lock_loss_union.append(lock_loss_flag)
             half_cycle_union.append(half_cycle_flag)
-            lli_values_str = ';'.join([f"{fn}:{lli_by_freq.get(fn, 0)}" for fn in lli_freqs])
+            lli_values_str = ';'.join([
+                f"{fn}:{lli_by_freq[fn] if lli_by_freq.get(fn) is not None else 'NA'}"
+                for fn in lli_freqs
+            ])
 
             if lock_loss_flag:
                 cycle_slip_events.append({
@@ -517,6 +610,7 @@ class CycleSlipDetector:
             'epochs': epochs,
             'lli_freqs': lli_freqs,
             'lli_raw_by_freq': lli_raw_by_freq,
+            'lli_known_by_freq': lli_known_by_freq,
             'bit0_by_freq': bit0_by_freq,
             'bit1_by_freq': bit1_by_freq,
             'lock_loss_union': lock_loss_union,
