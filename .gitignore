@@ -24,6 +24,9 @@ gnss_converter.log
 tools/conversion_tools/gnss_converter.log
 Android_GNSS_Analysis/tools/conversion_tools/gnss_converter.log
 
+# --- 本机使用状态 ---
+Android_GNSS_Analysis/.tool_usage.json
+
 # --- Python ---
 *.pyc
 __pycache__/

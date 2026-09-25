@@ -6,6 +6,7 @@ from src.visualization.plotter import GNSSPlotter
 from src.data.reader import RinexReader
 from src.processing.calculator import MetricCalculator
 from src.reporting.reporter import ReportGenerator
+from src.visualization.batch_exporter import VisualizationBatchExporter
 
 
 class VisualizationWindow:
@@ -30,11 +31,11 @@ class VisualizationWindow:
         cache_key = 'pseudorange_multipath_auto'
         if freq_pair:
             cache_key = f'pseudorange_multipath_{freq_pair[0]}+{freq_pair[1]}'
-        if cache_key not in self.context.results:
-            self.context.results[cache_key] = mc.calculate_pseudorange_multipath(
+        if not self.context.is_result_current(cache_key):
+            self.context.cache_result(cache_key, mc.calculate_pseudorange_multipath(
                 {'observations_meters': self.context.observations_meters},
                 freq_pair=freq_pair,
-            )
+            ))
         return self.plotter.plot_pseudorange_multipath(
             self.context.results[cache_key],
             sat_id,
@@ -81,15 +82,15 @@ class VisualizationWindow:
         ionofree = self.context.results.get('ionofree_cmc', {})
         if not ionofree:
             mc = MetricCalculator()
-            if 'code_phase_differences' not in self.context.results:
+            if not self.context.is_result_current('code_phase_differences'):
                 inputs = {
                     'observations_meters': self.context.observations_meters,
-                    'frequencies': self.context.frequencies,
-                    'wavelengths': self.context.wavelengths
+                    'frequencies': self.context.current_frequencies or self.context.frequencies,
+                    'wavelengths': self.context.current_wavelengths or self.context.wavelengths
                 }
-                self.context.results['code_phase_differences'] = mc.calculate_code_phase_differences(inputs)
+                self.context.cache_result('code_phase_differences', mc.calculate_code_phase_differences(inputs))
             ionofree = mc.calculate_ionofree_cmc({'code_phase_differences': self.context.results['code_phase_differences']})
-            self.context.results['ionofree_cmc'] = ionofree
+            self.context.cache_result('ionofree_cmc', ionofree)
         return self.plotter.plot_ionofree_cmc(ionofree, sat_id=sat_id, save=save, output_dir=output_dir)
 
     def plot_inter_freq_bias(self, freq1: str, freq2: str, constellation: Optional[str] = None, 
@@ -113,7 +114,7 @@ class VisualizationWindow:
 
         top = tk.Toplevel(parent)
         top.title('图表生成')
-        top.geometry('800x850')  # Increased size
+        top.geometry('800x900')  # Increased size
         top.transient(parent)
         top.grab_set()
 
@@ -516,10 +517,6 @@ class VisualizationWindow:
                     messagebox.showwarning('警告', '文件中未找到观测数据')
                     status_var.set('未找到数据')
                     return
-                # populate context for later plotting
-                self.context.observations_meters = obs
-                self.context.results['epochs'] = data.get('data', {}).get('epochs', [])
-
                 # build frequencies/wavelengths maps consistent with config (system -> freq -> Hz/m)
                 freq_map: Dict[str, Dict[str, float]] = {}
                 wavelengths_map: Dict[str, Dict[str, float]] = {}
@@ -540,7 +537,7 @@ class VisualizationWindow:
                     wavelengths_map.setdefault(system, {})
                     for f, fv in fmap.items():
                         # prefer config value, else derive from wavelength, else nominal guess
-                        cfg_freq = self.context.frequencies.get(system, {}).get(f)
+                        cfg_freq = self.context.nominal_frequencies.get(system, {}).get(f)
                         wlist = fv.get('wavelength', [])
                         wl = next((x for x in wlist if x is not None), None)
 
@@ -557,14 +554,13 @@ class VisualizationWindow:
                             freq_map[system][f] = freq_hz
                             wavelengths_map[system][f] = C / freq_hz
 
-                # merge back into context to keep downstream calculator expectations (dict of dicts)
-                for sys, freqs in freq_map.items():
-                    self.context.frequencies.setdefault(sys, {}).update(freqs)
-                for sys, wl_map in wavelengths_map.items():
-                    self.context.wavelengths.setdefault(sys, {}).update(wl_map)
-
-                self.context.results['frequencies'] = self.context.frequencies
-                self.context.results['wavelengths'] = self.context.wavelengths
+                self.context.replace_phone_data(
+                    obs,
+                    data.get('data', {}).get('epochs', []),
+                    source_path=file_var.get(),
+                    frequencies=freq_map,
+                    wavelengths=wavelengths_map,
+                )
 
                 sats = sorted(list(obs.keys()))
                 sat_prn_combo['values'] = sats
@@ -597,9 +593,6 @@ class VisualizationWindow:
                     messagebox.showwarning('警告', '接收机文件中未找到观测数据')
                     status_var.set('未找到数据')
                     return
-                # populate context
-                self.context.receiver_observations = obs
-                self.context.results['receiver_epochs'] = data.get('data', {}).get('epochs', [])
                 # build freqs/wavelengths with fallback
                 freq_map = {}
                 wavelengths_map = {}
@@ -609,15 +602,20 @@ class VisualizationWindow:
                     freq_map.setdefault(system, {})
                     wavelengths_map.setdefault(system, {})
                     for f, fv in fmap.items():
-                        cfg_freq = self.context.frequencies.get(system, {}).get(f)
+                        cfg_freq = self.context.nominal_frequencies.get(system, {}).get(f)
                         wl_list = fv.get('wavelength', [])
                         wl = next((x for x in wl_list if x is not None), None)
                         freq_hz = cfg_freq if cfg_freq is not None else (C / wl if wl else 1575.42e6)
                         freq_map[system][f] = freq_hz
                         wavelengths_map[system][f] = C / freq_hz
 
-                self.context.results['receiver_frequencies'] = freq_map
-                self.context.results['receiver_wavelengths'] = wavelengths_map
+                self.context.replace_receiver_data(
+                    obs,
+                    data.get('data', {}).get('epochs', []),
+                    source_path=rx_var.get(),
+                    frequencies=freq_map,
+                    wavelengths=wavelengths_map,
+                )
 
                 # If phone not loaded, use receiver to populate combos
                 if not self.context.observations_meters:
@@ -726,8 +724,8 @@ class VisualizationWindow:
             inputs = {
                 'observations_meters': self.context.observations_meters,
                 'epochs': self.context.results.get('epochs', []),
-                'frequencies': self.context.frequencies,
-                'wavelengths': self.context.wavelengths
+                'frequencies': self.context.current_frequencies or self.context.frequencies,
+                'wavelengths': self.context.current_wavelengths or self.context.wavelengths
             }
             
             # Helper to check and calc
@@ -738,14 +736,14 @@ class VisualizationWindow:
 
             # Lazy calc based on need, or just Calc All? 
             # Calculating all is safer for 'pre_calculate'
-            if 'observable_derivatives' not in self.context.results:
-                self.context.results['observable_derivatives'] = mc.calculate_derivatives(inputs)
-            if 'code_phase_differences' not in self.context.results:
-                self.context.results['code_phase_differences'] = mc.calculate_code_phase_differences(inputs)
-            if 'phase_prediction_errors' not in self.context.results:
-                self.context.results['phase_prediction_errors'] = mc.calculate_phase_prediction_errors(inputs)
-            if 'epoch_double_diffs' not in self.context.results:
-                self.context.results['epoch_double_diffs'] = mc.calculate_epoch_double_differences(inputs)
+            if not self.context.is_result_current('observable_derivatives'):
+                self.context.cache_result('observable_derivatives', mc.calculate_derivatives(inputs))
+            if not self.context.is_result_current('code_phase_differences'):
+                self.context.cache_result('code_phase_differences', mc.calculate_code_phase_differences(inputs))
+            if not self.context.is_result_current('phase_prediction_errors'):
+                self.context.cache_result('phase_prediction_errors', mc.calculate_phase_prediction_errors(inputs))
+            if not self.context.is_result_current('epoch_double_diffs'):
+                self.context.cache_result('epoch_double_diffs', mc.calculate_epoch_double_differences(inputs))
 
         def _get_pseudorange_multipath_results(freq_pair_selection: str = '自动选择', smoothing_window: int = 5):
             mc = MetricCalculator()
@@ -760,12 +758,12 @@ class VisualizationWindow:
                 else f'pseudorange_multipath_{selected_freq_pair[0]}+{selected_freq_pair[1]}'
             )
             cache_key = f'{cache_key}_w{smoothing_window}'
-            if cache_key not in self.context.results:
-                self.context.results[cache_key] = mc.calculate_pseudorange_multipath(
+            if not self.context.is_result_current(cache_key):
+                self.context.cache_result(cache_key, mc.calculate_pseudorange_multipath(
                     {'observations_meters': self.context.observations_meters},
                     freq_pair=selected_freq_pair,
                     smoothing_window=smoothing_window,
-                )
+                ))
             return self.context.results.get(cache_key, {}), selected_freq_pair
 
         def _save_pseudorange_multipath_overview(output_dir: str, save: bool = True):
@@ -803,12 +801,17 @@ class VisualizationWindow:
                     if not self.context.receiver_observations:
                         messagebox.showerror('错误', '请先加载接收机文件')
                         return
-                    if 'receiver_cmc' not in self.context.results:
+                    if not self.context.is_result_current('receiver_cmc', depends_on='receiver'):
                         mc = MetricCalculator()
-                        self.context.results['receiver_cmc'] = mc.calculate_receiver_cmc({
+                        receiver_cmc = mc.calculate_receiver_cmc({
+                            'receiver_observations': self.context.receiver_observations,
                             'receiver_frequencies': self.context.results.get('receiver_frequencies'),
                             'receiver_wavelengths': self.context.results.get('receiver_wavelengths')
                         })
+                        self.context.cache_result('receiver_cmc', receiver_cmc, depends_on='receiver')
+                    if not self.context.results['receiver_cmc']:
+                        messagebox.showwarning('警告', '未生成接收机CMC，请检查伪距和载波相位观测')
+                        return
                     out = self.plotter.plot_receiver_cmc(self.context.results['receiver_cmc'], save=False)
 
                 # Pseudorange Multipath Special Case
@@ -846,14 +849,14 @@ class VisualizationWindow:
                         return
                     # 确保CMC已计算
                     mc = MetricCalculator()
-                    if 'code_phase_differences' not in self.context.results:
+                    if not self.context.is_result_current('code_phase_differences'):
                         inputs = {
                             'observations_meters': self.context.observations_meters,
                             'epochs': self.context.results.get('epochs', []),
-                            'frequencies': self.context.frequencies,
-                            'wavelengths': self.context.wavelengths
+                            'frequencies': self.context.current_frequencies or self.context.frequencies,
+                            'wavelengths': self.context.current_wavelengths or self.context.wavelengths
                         }
-                        self.context.results['code_phase_differences'] = mc.calculate_code_phase_differences(inputs)
+                        self.context.cache_result('code_phase_differences', mc.calculate_code_phase_differences(inputs))
                     # 解析GUI频率组合选择
                     freq_pair_selection = freq_pair_var.get()
                     selected_freq_pair = None
@@ -863,10 +866,10 @@ class VisualizationWindow:
                             selected_freq_pair = tuple(parts)
                     # 用频率对作为缓存key，不同频率对不共享缓存
                     cache_key = f'ionofree_cmc_{freq_pair_selection}'
-                    if cache_key not in self.context.results:
-                        self.context.results[cache_key] = mc.calculate_ionofree_cmc(
+                    if not self.context.is_result_current(cache_key):
+                        self.context.cache_result(cache_key, mc.calculate_ionofree_cmc(
                             {'code_phase_differences': self.context.results['code_phase_differences']},
-                            freq_pair=selected_freq_pair)
+                            freq_pair=selected_freq_pair))
                     ionofree = self.context.results[cache_key]
                     if not ionofree:
                         messagebox.showwarning('警告', '无法计算无电离层组合CMC（需要双频数据，请检查频率组合选择）')
@@ -890,16 +893,16 @@ class VisualizationWindow:
                         return
                     # We assume ISB analysis might be complex. 
                     # For simplicity, if not in results, we try to calculating it
-                    if 'isb_analysis' not in self.context.results:
+                    if not self.context.is_result_current('isb_analysis', depends_on='both'):
                          messagebox.showinfo("提示", "ISB分析可能需要较长时间计算，请稍候...")
                          top.update_idletasks()
                          mc = MetricCalculator()
                          # NOTE: update with actual args needed for calculate_isb
-                         self.context.results['isb_analysis'] = mc.calculate_isb({
+                         self.context.cache_result('isb_analysis', mc.calculate_isb({
                              'observations_meters': self.context.observations_meters,
                              'receiver_observations': self.context.receiver_observations,
                              'epochs': self.context.results.get('epochs', [])
-                         })
+                         }), depends_on='both')
                     out = self.plotter.plot_isb_analysis(self.context.results.get('isb_analysis', {}), save=False)
 
                 # Cycle Slip Detection Special Case
@@ -952,13 +955,13 @@ class VisualizationWindow:
                     )
                     detection_results = detector.detect_cycle_slips(
                         self.context.observations_meters,
-                        self.context.frequencies,
-                        self.context.wavelengths,
+                        self.context.current_frequencies or self.context.frequencies,
+                        self.context.current_wavelengths or self.context.wavelengths,
                         freq_pair=freq_pair
                     )
                     
                     # 保存到context以便后续使用
-                    self.context.results['cycle_slip_detection'] = detection_results
+                    self.context.cache_result('cycle_slip_detection', detection_results)
                     
                     # 构建保存路径：results/文件名/cycleslips/
                     phone_file = file_var.get()
@@ -1038,7 +1041,7 @@ class VisualizationWindow:
                                 return
                             
                             # 保存到context
-                            self.context.results['inter_freq_bias'] = analysis_result
+                            self.context.cache_result('inter_freq_bias', analysis_result)
                             
                             # 绘图
                             out = self.plotter.plot_inter_freq_bias(analysis_result, save=False)
@@ -1103,6 +1106,23 @@ class VisualizationWindow:
             )
 
         # Batch Save buttons
+        def _batch_parameters():
+            selected_pair = None
+            selection = freq_pair_var.get()
+            if selection and selection != '自动选择':
+                parts = tuple(part.strip() for part in selection.split('+') if part.strip())
+                if len(parts) == 2:
+                    selected_pair = parts
+            use_custom = threshold_mode_var.get() == 'custom'
+            return {
+                **_sequence_plot_filters(),
+                'smoothing_window': int(multipath_window_var.get() or '5'),
+                'freq_pair': selected_pair,
+                'use_custom_threshold': use_custom,
+                'mw_threshold': float(mw_threshold_var.get()) if use_custom else None,
+                'gf_threshold': float(gf_threshold_var.get()) if use_custom else None,
+            }
+
         def batch_save_all():
              if not self.context.observations_meters:
                  messagebox.showwarning('警告', '无数据')
@@ -1121,6 +1141,24 @@ class VisualizationWindow:
              project_dir = os.path.join(base_dir, "Arna_results", obs_name, "visualization")
              if not os.path.exists(project_dir):
                  os.makedirs(project_dir)
+
+             exporter = VisualizationBatchExporter(self.context, self.plotter)
+             status_var.set(f'正在保存全部图表至: {project_dir} ...')
+             top.update_idletasks()
+             summary = exporter.export_all(project_dir, _batch_parameters())
+             save_visualization_manifest(project_dir, 'all', summary['success_count'])
+             status_var.set(
+                 f'全部导出完成: 成功 {summary["success_count"]}，'
+                 f'跳过 {summary["skipped_count"]}，失败 {summary["failure_count"]}'
+             )
+             messagebox.showinfo(
+                 '批量导出完成',
+                 f'成功: {summary["success_count"]}\n'
+                 f'跳过: {summary["skipped_count"]}\n'
+                 f'失败: {summary["failure_count"]}\n'
+                 f'错误清单: {summary["error_log"]}'
+             )
+             return
              
              status_var.set(f'正在保存至: {project_dir} ...')
              top.update_idletasks()
@@ -1247,6 +1285,28 @@ class VisualizationWindow:
                 os.makedirs(project_dir)
 
             chart_type = chart_var.get()
+
+            exporter = VisualizationBatchExporter(self.context, self.plotter)
+            status_var.set(f'正在批量保存 {chart_type} ...')
+            top.update_idletasks()
+            result = exporter.export_chart(chart_type, project_dir, _batch_parameters())
+            save_visualization_manifest(project_dir, chart_type, result['count'])
+            status_var.set(
+                f'导出完成: 成功 {result["count"]}，'
+                f'跳过 {len(result["skipped"])}，失败 {len(result["errors"])}'
+            )
+            if result['errors']:
+                error_path = os.path.join(project_dir, 'visualization_export_errors.json')
+                import json
+                with open(error_path, 'w', encoding='utf-8') as fh:
+                    json.dump({'results': [result]}, fh, ensure_ascii=False, indent=2, default=str)
+            messagebox.showinfo(
+                '导出完成',
+                f'成功: {result["count"]}\n跳过: {len(result["skipped"])}\n'
+                f'失败: {len(result["errors"])}\n目录: '
+                f'{os.path.join(project_dir, exporter.FOLDERS[chart_type])}'
+            )
+            return
 
             # Map chart_type to Folder Name
             folder_map = {
@@ -1436,8 +1496,8 @@ class VisualizationWindow:
                     )
                     detection_results = detector.detect_cycle_slips(
                         self.context.observations_meters,
-                        self.context.frequencies,
-                        self.context.wavelengths,
+                        self.context.current_frequencies or self.context.frequencies,
+                        self.context.current_wavelengths or self.context.wavelengths,
                         freq_pair=freq_pair
                     )
 
@@ -1462,14 +1522,14 @@ class VisualizationWindow:
 
                 if chart_type == 'ionofree_cmc':
                     mc = MetricCalculator()
-                    if 'code_phase_differences' not in self.context.results:
+                    if not self.context.is_result_current('code_phase_differences'):
                         inputs = {
                             'observations_meters': self.context.observations_meters,
                             'epochs': self.context.results.get('epochs', []),
-                            'frequencies': self.context.frequencies,
-                            'wavelengths': self.context.wavelengths
+                            'frequencies': self.context.current_frequencies or self.context.frequencies,
+                            'wavelengths': self.context.current_wavelengths or self.context.wavelengths
                         }
-                        self.context.results['code_phase_differences'] = mc.calculate_code_phase_differences(inputs)
+                        self.context.cache_result('code_phase_differences', mc.calculate_code_phase_differences(inputs))
 
                     freq_pair_selection = freq_pair_var.get()
                     selected_freq_pair = None
@@ -1479,10 +1539,10 @@ class VisualizationWindow:
                             selected_freq_pair = tuple(parts)
 
                     cache_key = f'ionofree_cmc_{freq_pair_selection}'
-                    if cache_key not in self.context.results:
-                        self.context.results[cache_key] = mc.calculate_ionofree_cmc(
+                    if not self.context.is_result_current(cache_key):
+                        self.context.cache_result(cache_key, mc.calculate_ionofree_cmc(
                             {'code_phase_differences': self.context.results['code_phase_differences']},
-                            freq_pair=selected_freq_pair)
+                            freq_pair=selected_freq_pair))
                     ionofree = self.context.results.get(cache_key, {})
                     for sid in sorted(ionofree.keys()):
                         try:
@@ -1492,7 +1552,7 @@ class VisualizationWindow:
                             continue
 
                 elif chart_type == 'isb_analysis':
-                    if 'isb_analysis' not in self.context.results:
+                    if not self.context.is_result_current('isb_analysis', depends_on='both'):
                         messagebox.showerror('错误', '请先进行ISB分析或加载数据')
                         return
                     self.plotter.plot_isb_analysis(self.context.results['isb_analysis'], save=True, output_dir=target_dir)

@@ -271,13 +271,21 @@ def _plot_prediction_error_rms(samples, path):
     nrows = int(math.ceil(len(panels) / ncols))
     fig = Figure(figsize=(4.2 * ncols, 3.2 * nrows))
     FigureCanvasAgg(fig)
-    axes = fig.subplots(nrows, ncols, squeeze=False, sharex=True, sharey=True)
+    # Prediction accuracy can differ greatly between signal frequencies.  A
+    # shared y-axis lets one degraded frequency flatten every healthy panel,
+    # so keep only the prediction-length x-axis shared.
+    axes = fig.subplots(nrows, ncols, squeeze=False, sharex=True, sharey=False)
     for ax, panel in zip(axes.flat, panels):
         panel_series = [item for item in series.items() if item[0][0][:1] == panel[0] and item[0][1] == panel[1]]
+        panel_max = 0.0
         for (sat, freq), values in sorted(panel_series, key=lambda item: _sat_key(item[0][0])):
             values.sort()
+            panel_max = max(panel_max, max((v[1] for v in values), default=0.0))
             ax.plot([v[0] for v in values], [v[1] for v in values], marker='o', markersize=2.2,
                     linewidth=0.8, label=sat)
+        # RMS is non-negative.  Give each frequency its own readable range and
+        # retain a small headroom for line markers and legends.
+        ax.set_ylim(0.0, panel_max * 1.08 if panel_max > 0.0 else 1.0)
         ax.set_title(f'{panel[0]} {panel[1]}')
         ax.grid(True, alpha=0.25)
         ax.legend(fontsize=5 if len(panel_series) > 12 else 6,

@@ -877,12 +877,15 @@ class MetricCalculator:
                 times = obs.get('times', []) or []
                 phases = obs.get('phase', []) or []
                 dopplers = obs.get('doppler', []) or []
+                phase_lli = obs.get('phase_lli', []) or []
                 count = len(times)
                 valid_doppler = sum(1 for i in range(count)
                                     if i < len(dopplers) and dopplers[i] is not None)
                 residuals = []
+                raw_residuals = []
                 accelerations = []
                 residual_times = []
+                phase_reset_events = []
                 doppler_by_frequency[freq] = {
                     times[i]: dopplers[i] for i in range(min(count, len(dopplers)))
                     if dopplers[i] is not None
@@ -909,7 +912,29 @@ class MetricCalculator:
                     if d0 is not None and d1 is not None:
                         accelerations.append((d1 - d0) / dt)
                         if i < len(phases) and phases[i - 1] is not None and phases[i] is not None:
-                            residuals.append((phases[i] - phases[i - 1]) - 0.5 * (d0 + d1) * dt)
+                            residual = ((phases[i] - phases[i - 1])
+                                        - 0.5 * (d0 + d1) * dt)
+                            raw_residuals.append(residual)
+                            previous_lli = phase_lli[i - 1] if i - 1 < len(phase_lli) else None
+                            current_lli = phase_lli[i] if i < len(phase_lli) else None
+                            previous_loss = (previous_lli is not None
+                                             and (int(previous_lli) & 1) != 0)
+                            current_loss = (current_lli is not None
+                                            and (int(current_lli) & 1) != 0)
+                            lli_break = current_loss and not previous_loss
+                            reset_break = abs(residual) > 100.0
+                            if lli_break or reset_break:
+                                phase_reset_events.append({
+                                    'time': times[i],
+                                    'residual_m': residual,
+                                    'previous_lli': previous_lli,
+                                    'current_lli': current_lli,
+                                    'reason': ('lli_and_large_jump' if lli_break and reset_break
+                                               else 'lli_loss_of_lock' if lli_break
+                                               else 'large_phase_jump'),
+                                })
+                                continue
+                            residuals.append(residual)
                             residual_times.append(times[i])
 
                 abs_residuals = [abs(value) for value in residuals]
@@ -919,24 +944,38 @@ class MetricCalculator:
                 robust_sigma = 1.4826 * mad if mad is not None else None
                 threshold = max(0.5, 4.0 * robust_sigma) if robust_sigma is not None else 0.5
                 outlier_count = sum(1 for value in abs_residuals if value > threshold)
+                residual_abs_median = statistics.median(abs_residuals) if abs_residuals else None
+                residual_p95 = percentile(abs_residuals, 95)
+                persistent_mismatch = bool(
+                    len(residuals) >= 20
+                    and residual_abs_median is not None and residual_abs_median > 2.0
+                    and residual_p95 is not None and residual_p95 > 5.0
+                )
                 stats = {
                     'total_epochs': count,
                     'valid_doppler_epochs': valid_doppler,
                     'completeness_percent': 100.0 * valid_doppler / count if count else 0.0,
                     'residual_times': residual_times,
                     'phase_consistency_residuals': residuals,
+                    'raw_phase_consistency_residuals': raw_residuals,
                     'residual_bias_m': statistics.mean(residuals) if residuals else None,
+                    'residual_median_abs_m': residual_abs_median,
                     'residual_rms_m': math.sqrt(sum(v * v for v in residuals) / len(residuals)) if residuals else None,
                     'residual_mad_m': mad,
-                    'residual_p95_m': percentile(abs_residuals, 95),
+                    'residual_p95_m': residual_p95,
                     'outlier_threshold_m': threshold,
                     'outlier_count': outlier_count,
-                    'outlier_rate_percent': 100.0 * outlier_count / len(residuals) if residuals else 0.0,
+                    'outlier_rate_percent': (100.0 * outlier_count / len(residuals)
+                                             if residuals else None),
                     'acceleration_rms_mps2': (math.sqrt(sum(v * v for v in accelerations) / len(accelerations))
                                               if accelerations else None),
                     'acceleration_p95_mps2': percentile([abs(v) for v in accelerations], 95),
                     'accelerations_mps2': accelerations,
                     'valid_residual_count': len(residuals),
+                    'raw_residual_count': len(raw_residuals),
+                    'phase_reset_count': len(phase_reset_events),
+                    'phase_reset_events': phase_reset_events,
+                    'persistent_mismatch': persistent_mismatch,
                     'nominal_interval_seconds': nominal_dt,
                 }
                 sat_result[freq] = stats

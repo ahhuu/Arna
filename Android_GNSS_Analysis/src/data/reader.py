@@ -75,6 +75,8 @@ class RinexReader:
         final_satellite_wavelengths = {}
 
         header_parsed = False
+        current_obs_system = None
+        expected_obs_types = {}
         with open(file_path, 'r', encoding='utf-8') as f:
             # Step 1: Parse Header
             for line in f:
@@ -90,10 +92,23 @@ class RinexReader:
                         data['header']['version'] = None
                 elif 'MARKER NAME' in line:
                     data['header']['marker'] = line[:60].strip()
-                elif 'OBS TYPES' in line:
-                    system = line[0]
-                    obs_types = line[6:60].split()
-                    data['header'].setdefault(f'obs_types_{system}', []).extend(obs_types)
+                elif 'SYS / # / OBS TYPES' in line:
+                    # The constellation is present only on the first record;
+                    # continuation records start with a blank system column.
+                    explicit_system = line[0].strip()
+                    if explicit_system:
+                        current_obs_system = explicit_system
+                        try:
+                            expected_obs_types[current_obs_system] = int(line[3:6])
+                        except (TypeError, ValueError):
+                            expected_obs_types[current_obs_system] = 0
+                        data['header'][f'obs_types_{current_obs_system}'] = []
+                    if current_obs_system:
+                        key = f'obs_types_{current_obs_system}'
+                        data['header'].setdefault(key, []).extend(line[7:60].split())
+                        expected = expected_obs_types.get(current_obs_system, 0)
+                        if expected:
+                            data['header'][key] = data['header'][key][:expected]
 
             if not header_parsed:
                 return {'data': data, 'observations_meters': {}, 'satellite_wavelengths': {}}
@@ -295,7 +310,11 @@ class RinexReader:
                     j += 1
                     while j < len(header_lines) and len(obs_types_list) < num_types:
                         cont_line = header_lines[j]
-                        if 'SYS / # / OBS TYPES' in cont_line:
+                        # RINEX 3 continuation records have a blank system column.
+                        # Do not consume the first record of the next constellation
+                        # when a malformed/incomplete count is encountered.
+                        if ('SYS / # / OBS TYPES' in cont_line
+                                and not cont_line[0].strip()):
                             obs_types_list.extend(cont_line[7:60].split())
                             j += 1
                         else:
@@ -305,7 +324,9 @@ class RinexReader:
                     continue
                 j += 1
 
-            target_freqs = {'G': ['L1C', 'L5Q'], 'R': ['L1C'], 'E': ['L1C', 'L5Q', 'L7Q'], 'C': ['L2I', 'L1P', 'L5P']}
+            target_freqs = {'G': ['L1C', 'L5Q'], 'R': ['L1C'],
+                            'E': ['L1C', 'L5Q', 'L7Q'],
+                            'C': ['L2I', 'L1P', 'L5P', 'L7D']}
 
             # Step 2: Parse Body (Streaming)
             current_epoch = None

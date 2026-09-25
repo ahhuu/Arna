@@ -2171,6 +2171,9 @@ class GNSSPlotter:
                 valid_doppler = sum(member.get('valid_doppler_epochs', 0) for member in members)
                 valid_residuals = sum(member.get('valid_residual_count', 0) for member in members)
                 outliers = sum(member.get('outlier_count', 0) for member in members)
+                phase_resets = sum(member.get('phase_reset_count', 0) for member in members)
+                persistent_mismatches = sum(1 for member in members
+                                            if member.get('persistent_mismatch'))
                 median_residual = statistics.median(residuals) if residuals else None
                 plot_rows.append({
                     'sat_id': system_label,
@@ -2188,8 +2191,12 @@ class GNSSPlotter:
                     'residual_p95_m': percentile([abs(v) for v in residuals], 95),
                     'outlier_count': outliers,
                     'valid_residual_count': valid_residuals,
-                    'outlier_rate_percent': 100.0 * outliers / valid_residuals if valid_residuals else 0.0,
+                    'outlier_rate_percent': (100.0 * outliers / valid_residuals
+                                             if valid_residuals else None),
                     'acceleration_p95_mps2': percentile([abs(v) for v in accelerations], 95),
+                    'phase_reset_count': phase_resets,
+                    'persistent_mismatch_count': persistent_mismatches,
+                    'persistent_mismatch': persistent_mismatches > 0,
                 })
             grouping_label = 'System-Frequency Summary'
         else:
@@ -2228,9 +2235,39 @@ class GNSSPlotter:
             ax.grid(True, axis='y', alpha=0.3)
             for bar, row, value in zip(bars, plot_rows, values):
                 bar._doppler_quality_row = row
+                if key == 'residual_rms_m' and row.get('persistent_mismatch'):
+                    bar.set_edgecolor('darkred')
+                    bar.set_linewidth(2.0)
+                    ax.annotate(
+                        'PERSISTENT MISMATCH',
+                        xy=(bar.get_x() + bar.get_width() / 2, bar.get_height()),
+                        xytext=(0, 24), textcoords='offset points',
+                        ha='center', va='bottom', fontsize=8, fontweight='bold',
+                        color='darkred',
+                        bbox={'boxstyle': 'round,pad=0.3', 'facecolor': '#fff2a8',
+                              'edgecolor': 'darkred', 'linewidth': 1.2},
+                        arrowprops={'arrowstyle': '-|>', 'color': 'darkred',
+                                    'linewidth': 1.2},
+                        annotation_clip=False,
+                    )
+                if row.get(key) is None:
+                    bar.set_facecolor('lightgray')
+                    bar.set_hatch('//')
+                    ax.text(bar.get_x() + bar.get_width() / 2, 0,
+                            'NA', ha='center', va='bottom', fontsize=7,
+                            rotation=90)
                 if len(plot_rows) <= 20:
-                    ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height(),
-                            f'{value:.2f}', ha='center', va='bottom', fontsize=7)
+                    if row.get(key) is not None:
+                        mismatch_rms = key == 'residual_rms_m' and row.get('persistent_mismatch')
+                        ax.text(bar.get_x() + bar.get_width() / 2,
+                                bar.get_height() * (0.97 if mismatch_rms else 1.0),
+                                f'{value:.2f}', ha='center',
+                                va='top' if mismatch_rms else 'bottom', fontsize=7,
+                                color='white' if mismatch_rms else 'black',
+                                fontweight='bold' if mismatch_rms else 'normal')
+            if key == 'residual_rms_m' and any(row.get('persistent_mismatch') for row in plot_rows):
+                ymin, ymax = ax.get_ylim()
+                ax.set_ylim(ymin, ymax * 1.18)
 
         fig.suptitle(f'Doppler Quality Analysis - {grouping_label}', fontsize=15, fontweight='bold')
         fig.tight_layout(rect=(0, 0.02, 1, 0.97), h_pad=2.2, w_pad=2.0)
@@ -2244,7 +2281,9 @@ class GNSSPlotter:
                     f"Completeness: {row.get('completeness_percent', 0):.2f}%\n"
                     f"Residual RMS: {row.get('residual_rms_m') if row.get('residual_rms_m') is not None else 'NA'}\n"
                     f"Residual P95: {row.get('residual_p95_m') if row.get('residual_p95_m') is not None else 'NA'}\n"
-                    f"Outliers: {row.get('outlier_count', 0)}/{row.get('valid_residual_count', 0)}"
+                    f"Outliers: {row.get('outlier_count', 0)}/{row.get('valid_residual_count', 0)}\n"
+                    f"Phase resets excluded: {row.get('phase_reset_count', 0)}\n"
+                    f"Persistent mismatch: {'YES' if row.get('persistent_mismatch') else 'NO'}"
                 )
             cursor.connect('add', _on_add)
 
@@ -2259,9 +2298,12 @@ class GNSSPlotter:
                 fh.write('Multi-system overview uses system-frequency aggregation; a single system or explicit satellite selection uses satellite-frequency detail.\n\n')
                 fh.write('Doppler-phase residual = phase range change - integrated Doppler range-rate\n')
                 fh.write('Outlier threshold = max(0.5 m, 4 * 1.4826 * MAD)\n\n')
+                fh.write('Residuals crossing an LLI loss-of-lock edge or exceeding 100 m are classified as phase resets and excluded from in-arc RMS.\n')
+                fh.write('Persistent mismatch requires N >= 20, median absolute residual > 2 m and residual P95 > 5 m.\n')
+                fh.write('NA means unevaluable; it does not mean zero error.\n\n')
                 fh.write('Plotted Groups:\n')
                 fh.write(f'{"Group":<18}{"Members":>8}{"Complete%":>11}{"RMS(m)":>11}{"MAD(m)":>11}'
-                         f'{"P95(m)":>11}{"Outlier%":>11}{"AccP95":>11}{"N":>8}\n')
+                         f'{"P95(m)":>11}{"Outlier%":>11}{"AccP95":>11}{"N":>8}{"Resets":>9}{"Mismatch":>10}\n')
                 for row in plot_rows:
                     def number(name, width=11, precision=4):
                         value = row.get(name)
@@ -2269,10 +2311,12 @@ class GNSSPlotter:
                     name = f"{row['sat_id']} {row['freq']}"
                     fh.write(f'{name:<18}{row.get("member_count", 1):>8}{row["completeness_percent"]:>11.2f}'
                              f'{number("residual_rms_m")}{number("residual_mad_m")}'
-                             f'{number("residual_p95_m")}{row["outlier_rate_percent"]:>11.2f}'
-                             f'{number("acceleration_p95_mps2")}{row["valid_residual_count"]:>8}\n')
+                             f'{number("residual_p95_m")}{number("outlier_rate_percent", precision=2)}'
+                             f'{number("acceleration_p95_mps2")}{row["valid_residual_count"]:>8}'
+                             f'{row.get("phase_reset_count", 0):>9}'
+                             f'{("YES" if row.get("persistent_mismatch") else "NO"):>10}\n')
                 fh.write('\nSatellite-Frequency Detail:\n')
-                fh.write(f'{"Satellite/Freq":<18}{"Complete%":>11}{"RMS(m)":>11}{"P95(m)":>11}{"Outlier%":>11}{"AccP95":>11}{"N":>8}\n')
+                fh.write(f'{"Satellite/Freq":<18}{"Complete%":>11}{"RMS(m)":>11}{"P95(m)":>11}{"Outlier%":>11}{"AccP95":>11}{"N":>8}{"Resets":>9}{"Mismatch":>10}\n')
                 for row in rows:
                     name = f"{row['sat_id']} {row['freq']}"
                     def detail_number(key):
@@ -2280,8 +2324,9 @@ class GNSSPlotter:
                         return f'{value:>11.4f}' if value is not None else f'{"NA":>11}'
                     fh.write(f'{name:<18}{row["completeness_percent"]:>11.2f}'
                              f'{detail_number("residual_rms_m")}{detail_number("residual_p95_m")}'
-                             f'{row["outlier_rate_percent"]:>11.2f}{detail_number("acceleration_p95_mps2")}'
-                             f'{row["valid_residual_count"]:>8}\n')
+                             f'{detail_number("outlier_rate_percent")}{detail_number("acceleration_p95_mps2")}'
+                             f'{row["valid_residual_count"]:>8}{row.get("phase_reset_count", 0):>9}'
+                             f'{("YES" if row.get("persistent_mismatch") else "NO"):>10}\n')
                 fh.write('\nCross-frequency Doppler consistency (m/s):\n')
                 fh.write(f'{"Satellite/Pair":<24}{"N":>8}{"Bias":>12}{"RMS":>12}{"P95":>12}\n')
                 for item in quality.get('cross_frequency', []):
